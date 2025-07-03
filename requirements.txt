@@ -4,7 +4,7 @@ nltk
 sympy
 requests
 python-dotenv
-serpapi==0.1.5
+git+https://github.com/serpapi/google-search-results-python.git
 Pillow
 replicate
 pytz
