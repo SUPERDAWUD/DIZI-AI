@@ -1,0 +1,12 @@
+flask
+torch
+nltk
+sympy
+requests
+python-dotenv
+serpapi
+Pillow
+replicate
+pytz
+numpy
+

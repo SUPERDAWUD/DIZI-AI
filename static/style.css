@@ -1,0 +1,143 @@
+body {
+  font-family: 'Segoe UI', sans-serif;
+  background: linear-gradient(135deg, #232526 0%, #414345 100%);
+  margin: 0;
+  padding: 0;
+}
+
+.chat-container {
+  max-width: 700px;
+  margin: 50px auto;
+  background: #23272f;
+  padding: 24px 24px 18px 24px;
+  border-radius: 16px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+  border: 1px solid #333;
+}
+
+h1 {
+  text-align: center;
+  margin-bottom: 20px;
+  color: #fff;
+  letter-spacing: 1px;
+}
+
+#chat-box {
+  max-height: 400px;
+  overflow-y: auto;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 12px;
+  background: #181a20;
+  color: #e0e0e0;
+  font-size: 17px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+
+.message {
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  border-radius: 8px;
+  transition: background 0.2s;
+  word-break: break-word;
+}
+
+.message.user {
+  text-align: right;
+  background: linear-gradient(90deg, #4ecca3 0%, #3aafa9 100%);
+  color: #23272f;
+  font-weight: 500;
+}
+
+.message.bot {
+  text-align: left;
+  background: #23272f;
+  color: #e0e0e0;
+  border: 1px solid #3aafa9;
+}
+
+.input-area {
+  display: flex;
+  gap: 10px;
+}
+
+input[type="text"] {
+  flex-grow: 1;
+  padding: 12px;
+  border: 1px solid #444;
+  border-radius: 8px;
+  font-size: 17px;
+  background: #23272f;
+  color: #e0e0e0;
+  outline: none;
+  transition: border 0.2s;
+}
+input[type="text"]:focus {
+  border: 1.5px solid #3aafa9;
+}
+
+button {
+  padding: 12px 20px;
+  font-size: 17px;
+  background: linear-gradient(90deg, #3aafa9 0%, #4ecca3 100%);
+  color: #23272f;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: background 0.2s;
+}
+button:hover {
+  background: linear-gradient(90deg, #4ecca3 0%, #3aafa9 100%);
+}
+
+#username-overlay {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 999;
+}
+
+.username-box {
+  background: white;
+  padding: 30px;
+  border-radius: 10px;
+  text-align: center;
+}
+
+.username-box input {
+  padding: 10px;
+  width: 200px;
+  font-size: 16px;
+  margin-bottom: 10px;
+}
+
+/* Loader for chatbot thinking */
+#bot-loader {
+  display: none;
+  margin: 0 auto 10px auto;
+  text-align: center;
+}
+.loader {
+  border: 4px solid #23272f;
+  border-top: 4px solid #3aafa9;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  animation: spin 1s linear infinite;
+  display: inline-block;
+}
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+#bot-loader span {
+  color: #3aafa9;
+  font-size: 15px;
+  margin-left: 10px;
+  vertical-align: middle;
+}
+

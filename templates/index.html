@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>DIZI Chatbot</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <!-- Name overlay -->
+  <div id="username-overlay" class="overlay">
+    <div class="popup">
+      <h2>What’s your name?</h2>
+      <input type="text" id="username-input" placeholder="Enter your name" />
+      <button onclick="startChat()">Start</button>
+    </div>
+  </div>
+
+  <!-- Main chat container -->
+  <div class="chat-container">
+    <h1>DIZI Chatbot</h1>
+    <div id="chat-box" class="chat-box"></div>
+    <div id="bot-loader">
+      <span class="loader"></span><span> DIZI is thinking...</span>
+    </div>
+    <div class="input-area">
+      <input type="text" id="user-input" placeholder="Type your message..." />
+      <button onclick="sendMessage()">Send</button>
+    </div>
+  </div>
+
+  <script>
+    let USER = null;
+
+    function startChat() {
+      const input = document.getElementById("username-input");
+      const name = input.value.trim();
+      if (!name) return;
+      USER = name.charAt(0).toUpperCase() + name.slice(1);
+      document.getElementById("username-overlay").style.display = "none";
+    }
+
+    async function sendMessage() {
+      const input = document.getElementById("user-input");
+      const msg = input.value.trim();
+      if (!msg || !USER) return;
+
+      appendMessage("You", msg);
+      input.value = "";
+
+      // Show loader
+      document.getElementById("bot-loader").style.display = "block";
+
+      const res = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user: USER, message: msg })
+      });
+
+      const data = await res.json();
+      // Hide loader
+      document.getElementById("bot-loader").style.display = "none";
+      appendMessage("DIZI", data.response);
+    }
+
+    function appendMessage(sender, text) {
+      const chatBox = document.getElementById("chat-box");
+      const messageDiv = document.createElement("div");
+      messageDiv.className = sender === "You" ? "message user" : "message bot";
+      messageDiv.innerHTML = `<strong>${sender}:</strong> ${text}`;
+
+      // Show image if response contains generated image URL
+      const match = text.match(/\/static\/generated\/[^\s]+\.jpg/g);
+      if (match) {
+        match.forEach(url => {
+          const img = document.createElement("img");
+          img.src = url;
+          img.alt = "Generated image";
+          img.style.maxWidth = "100%";
+          img.style.marginTop = "10px";
+          messageDiv.appendChild(document.createElement("br"));
+          messageDiv.appendChild(img);
+        });
+      }
+
+      chatBox.appendChild(messageDiv);
+      chatBox.scrollTop = chatBox.scrollHeight;
+    }
+  </script>
+</body>
+</html>
