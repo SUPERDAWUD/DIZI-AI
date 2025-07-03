@@ -9,7 +9,7 @@ import re
 import threading
 from sympy import symbols, Eq, solve, simplify, expand, factor, diff, integrate
 from dotenv import load_dotenv
-from serpapi.google_search import GoogleSearch
+from serpapi import GoogleSearch
 from chatbot_model import NeuralNet
 from utils import bag_of_words, tokenize, start_generator_api
 import pytz
