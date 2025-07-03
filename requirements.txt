@@ -4,7 +4,7 @@ nltk
 sympy
 requests
 python-dotenv
-serpapi
+serpapi>=2.0.0
 Pillow
 replicate
 pytz
