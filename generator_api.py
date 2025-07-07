@@ -19,7 +19,17 @@ def get_text_gen():
     try:
         from transformers import pipeline, set_seed
         set_seed(42)
-        return pipeline("text-generation", model="gpt2", device=0)
+        # Try a more capable instruction-following model if available
+        # Use Mistral-7B-Instruct if installed, else fallback to gpt2
+        try:
+            return pipeline("text-generation", model="mistralai/Mistral-7B-Instruct-v0.2", device=0)
+        except Exception:
+            # Fallback to flan-t5-base (if available)
+            try:
+                return pipeline("text2text-generation", model="google/flan-t5-base", device=0)
+            except Exception:
+                # Fallback to gpt2
+                return pipeline("text-generation", model="gpt2", device=0)
     except Exception as e:
         print(f"TextGen model load error: {e}")
         return None
@@ -55,18 +65,25 @@ def generate_speech():
     data = request.get_json()
     topic = data.get("topic", "something important")
     audience = data.get("audience", "everyone")
+    tone = data.get("tone", "informative")
     text_gen = get_text_gen()
     # Store topic in session for follow-up
     session[FOLLOWUP_KEY] = topic
     if text_gen:
-        prompt = f"Write a short, inspiring speech about {topic} for {audience}:\n"
-        result = text_gen(prompt, max_length=120, num_return_sequences=1, temperature=0.7)
-        speech = result[0]["generated_text"].replace(prompt, "").strip()
+        # Use a more explicit prompt for instruction models
+        prompt = f"Write a short, {tone} speech about {topic} for {audience}. The speech should be clear, on-topic, and inspiring.\n"
+        # Use text2text-generation if using flan-t5-base, else text-generation
+        if text_gen.task == "text2text-generation":
+            result = text_gen(prompt, max_length=120, num_return_sequences=1)
+            speech = result[0]["generated_text"] if "generated_text" in result[0] else result[0]["generated_text"]
+        else:
+            result = text_gen(prompt, max_length=120, num_return_sequences=1, temperature=0.7)
+            speech = result[0]["generated_text"].replace(prompt, "").strip()
         return jsonify({"speech": speech})
     # Fallback
     speech = (
         f"Dear {audience},\n\n"
-        f"Today I want to speak about {topic}. This topic touches the heart of our community..."
+        f"Today I want to speak about {topic}. This topic touches the heart of our community... "
         f"Together, we can make a difference.\n\nThank you."
     )
     return jsonify({"speech": speech})
