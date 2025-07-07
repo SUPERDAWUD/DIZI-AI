@@ -741,191 +741,252 @@ def get_recent_conversation(username, n=20):
             return []
         return [h for h in history if h["username"] == username][-n:]
 
-# Main response router
-def get_response(msg, username=None, ip_address=None):
-    # Normalize and correct grammar/spelling for intent/KB
-    norm_msg = normalize_grammar(msg)
-    if len(norm_msg) < 100:
-        msg_corrected = correct_sentence(norm_msg)
-    else:
-        msg_corrected = norm_msg
-    msg_lower = msg_corrected.strip().lower()
+# --- PDF, DOCX, Image OCR, and Document Q&A (Smarter) ---
+import base64
+from io import BytesIO
 
-    # Preprocess for math: strip common prefixes for math queries
-    math_prefixes = [
-        "whats ", "what's ", "what is ", "calculate ", "solve ", "evaluate ", "compute ", "find ", "give me ", "can you solve ", "can you calculate ", "can you evaluate ", "can you compute ", "can you find ", "please solve ", "please calculate ", "please evaluate ", "please compute ", "please find "
-    ]
-    math_msg = msg_lower
-    for prefix in math_prefixes:
-        if math_msg.startswith(prefix):
-            math_msg = math_msg[len(prefix):].strip()
-            break
-    # 1. Math (always highest priority)
-    math = handle_math(math_msg)
-    if math:
-        return math
-    # 2. File Q&A and file features (ChatGPT-like, now with redaction)
-    file_keywords = ["upload file", "analyze file", "summarize file", "extract from file", "read file", "file question", "file content", "file summary", "file data", "redact file", "redact"]
-    if any(kw in msg_lower for kw in file_keywords):
-        import re
-        match = re.search(r"file(?: named| called|:)?\s*([\w\-.]+)", msg_lower)
-        filename = match.group(1) if match else None
-        # Redaction logic
-        if "redact" in msg_lower and filename:
-            # Extract words/phrases to redact (e.g., "redact file myfile.txt words: secret, password")
-            redact_match = re.search(r"redact.*?words?[:\s]+([\w\s,]+)", msg_lower)
-            if redact_match:
-                phrases = [w.strip() for w in redact_match.group(1).split(',') if w.strip()]
-                if phrases:
-                    redacted_name, err = redact_file_content(filename, phrases)
-                    if err:
-                        return f"Redaction error: {err}"
-                    # Return download link for redacted file
-                    url = f"/uploads/{redacted_name}"
-                    return f"File '{filename}' redacted. <a href='{url}' target='_blank'>Download redacted file</a>"
-                else:
-                    return "Please specify words/phrases to redact (e.g., 'redact file myfile.txt words: secret, password')."
-            else:
-                return "Please specify words/phrases to redact (e.g., 'redact file myfile.txt words: secret, password')."
-        # ...existing file Q&A logic...
-        if filename:
-            content, err = get_uploaded_file_content(filename)
-            if err:
-                return f"File error: {err}"
-            question = msg
-            try:
-                resp = requests.post("http://localhost:5050/generate/followup", json={"topic": f"{question}\n\nFile content:\n{content[:2000]}"})
-                if resp.ok:
-                    answer = resp.json().get("followup", "")
-                    return f"File '{filename}' analyzed:\n{answer}"
-            except Exception as e:
-                return f"File read: {content[:1000]}...\n(Unable to generate answer: {e})"
-            return f"File read: {content[:1000]}..."
-        return "File upload and analysis features are available! Please upload your file using the upload button or /upload endpoint, then ask your question about the file (e.g., 'summarize file myfile.txt'). (Advanced file Q&A, code execution, and document analysis are supported if enabled.)"
-    # 2. Image prompt (always high priority, now returns direct URL for web UI)
-    if any(kw in msg_lower for kw in ["generate image of", "create image of", "picture of", "draw", "paint"]):
-        # Extract style/model/quality if present
-        style = None
-        quality = None
-        model_hint = None
-        # Example: "generate image of a cat in anime style, high quality, using dalle"
-        style_match = re.search(r"(in|with) ([\w\s]+) style", msg_lower)
-        if style_match:
-            style = style_match.group(2).strip()
-        quality_match = re.search(r"(high|low|ultra) quality", msg_lower)
-        if quality_match:
-            quality = quality_match.group(1).strip()
-        model_match = re.search(r"using (sdxl|dalle|dall-e|anime|realistic)", msg_lower)
-        if model_match:
-            model_hint = model_match.group(1).replace('dall-e', 'dalle').strip()
-        parts = re.split(r"generate image of|create image of|picture of|draw|paint", msg_lower, maxsplit=1)
-        if len(parts) > 1:
-            prompt = parts[1].strip()
-            # After image is generated, if it's a URL, return as HTML for web UI
-            result = generate_image_from_prompt(prompt, model_hint=model_hint, style=style, quality=quality)
-            if result and result.startswith("Here is your image: "):
-                url = result.split(": ", 1)[1].strip()
-                if url.startswith("http") or url.startswith("/uploads/"):
-                    return f"<img src='{url}' alt='Generated Image' style='max-width:400px;'><br>{result}"
-            return result
-        else:
-            return "What image would you like me to create?"
-    # 2b. Image analysis/captioning (if user asks about an uploaded image file)
-    if any(kw in msg_lower for kw in ["analyze image", "caption image", "describe image", "what is in image", "image file"]):
-        # If file is an image in uploads, return as HTML
-        if filename and filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
-            url = f"/uploads/{filename}"
-            return f"<img src='{url}' alt='Uploaded Image' style='max-width:400px;'><br>" + analyze_image_file(filename)
-        # ...existing code...
-    # 2c. Code execution (ChatGPT-like, multi-language)
-    if any(kw in msg_lower for kw in ["run code", "execute code", "run python", "execute python", "run script", "execute script", "run js", "run javascript", "execute js", "execute javascript"]):
-        # Try to extract code and language from message or file
-        import re
-        code = None
-        language = 'python'
-        match = re.search(r"```(python|js|javascript)?\n([\s\S]+?)```", msg, re.MULTILINE)
-        if match:
-            language = match.group(1) or 'python'
-            code = match.group(2)
-        else:
-            # Try to extract filename
-            match = re.search(r"file(?: named| called|:)?\s*([\w\-.]+)", msg_lower)
-            filename = match.group(1) if match else None
-            if filename:
-                content, err = get_uploaded_file_content(filename)
-                if err:
-                    return f"File error: {err}"
-                code = content
-                # Infer language from extension
-                if filename.endswith('.js'):
-                    language = 'js'
-        if code:
-            output, err = run_code(code, language)
-            if err:
-                return f"Code execution error: {err}"
-            return f"Code executed successfully. Output:\n{output}"
-        return "Please provide code (in triple backticks) or specify a file to run. Supported: Python, JavaScript."
-    # 3. Generator API fallback (for code/speech generation)
-    # Improved: robust speech trigger and topic extraction
-    topic, tone, audience, length = extract_speech_request(msg)
-    if topic:
+def extract_text_from_pdf(filepath):
+    """
+    Extracts text and tables from a PDF file using PyPDF2 and pandas (if possible).
+    Returns the extracted text, tables, and error message (if any).
+    """
+    try:
+        import PyPDF2
+        with open(filepath, 'rb') as f:
+            reader = PyPDF2.PdfReader(f)
+            text = "\n".join(page.extract_text() or '' for page in reader.pages)
+        # Try table extraction (very basic, for demonstration)
+        tables = []
         try:
-            # --- SPEECH GENERATION ---
-            payload = {"topic": topic, "audience": audience or "everyone", "tone": tone or "informative"}
-            if length:
-                payload["length"] = length
-            resp = requests.post("http://localhost:5050/generate/speech", json=payload)
-            if resp.ok:
-                speech = resp.json().get("speech", "")
-                if speech:
-                    followup_resp = requests.post("http://localhost:5050/generate/followup", json={})
-                    if followup_resp.ok:
-                        followup = followup_resp.json().get("followup", "")
-                        return f"Here's a {payload['tone']} speech draft:\n{speech}\n\n{followup}"
-                    return f"Here's a {payload['tone']} speech draft:\n{speech}"
-                else:
-                    return "I couldn't generate a speech for that topic yet, but I'm working on it!"
-        except Exception as e:
-            return f"Generator API error: {e}"
-    # 4. User's name (before intent)
-    if username and any(q in msg_lower for q in ["what is my name", "what's my name", "do you know my name", "who am i"]):
-        return f"Your name is {username}."
-    # 5. User's location (before intent)
-    if username and any(q in msg_lower for q in ["where do i live", "what's my location", "what is my location", "where am i"]):
-        loc = get_user_location_from_file(username)
-        if loc:
-            city = loc.get("city")
-            country = loc.get("country")
-            return f"You are in {city}, {country}."
+            import tabula
+            tables = tabula.read_pdf(filepath, pages='all', multiple_tables=True)
+            tables = [df.head(10).to_string() for df in tables if not df.empty]
+        except Exception:
+            pass
+        return text, tables, None
+    except Exception as e:
+        return None, None, f"PDF extraction error: {e}"
+
+def extract_text_from_docx(filepath):
+    """
+    Extracts text and tables from a DOCX file using python-docx.
+    Returns the extracted text, tables, and error message (if any).
+    """
+    try:
+        import docx
+        doc = docx.Document(filepath)
+        text = "\n".join([p.text for p in doc.paragraphs])
+        # Table extraction
+        tables = []
+        for table in doc.tables:
+            rows = []
+            for row in table.rows:
+                rows.append([cell.text for cell in row.cells])
+            import pandas as pd
+            df = pd.DataFrame(rows)
+            tables.append(df.head(10).to_string(index=False, header=False))
+        return text, tables, None
+    except Exception as e:
+        return None, None, f"DOCX extraction error: {e}"
+
+def extract_text_from_image(filepath):
+    """
+    Extracts text from an image file using pytesseract OCR.
+    Returns the extracted text and error message (if any).
+    """
+    try:
+        from PIL import Image
+        import pytesseract
+        text = pytesseract.image_to_string(Image.open(filepath))
+        return text, None
+    except Exception as e:
+        return None, f"Image OCR error: {e}"
+
+def extract_text_from_xlsx(filepath):
+    """
+    Extracts text and tables from an Excel file using pandas.
+    Returns the extracted text, tables, and error message (if any).
+    """
+    try:
+        import pandas as pd
+        xls = pd.ExcelFile(filepath)
+        text = []
+        tables = []
+        for sheet in xls.sheet_names:
+            df = xls.parse(sheet)
+            tables.append(df.head(10).to_string())
+            text.append(f"Sheet: {sheet}\n" + df.head(10).to_string())
+        return "\n\n".join(text), tables, None
+    except Exception as e:
+        return None, None, f"Excel extraction error: {e}"
+
+def detect_language_and_translate(text, target_lang='en'):
+    """
+    Detects language and translates to English if needed (using googletrans).
+    Returns (translated_text, detected_lang, error)
+    """
+    try:
+        from googletrans import Translator
+        translator = Translator()
+        detected = translator.detect(text)
+        if detected.lang != target_lang:
+            translated = translator.translate(text, dest=target_lang)
+            return translated.text, detected.lang, None
+        return text, detected.lang, None
+    except Exception as e:
+        return text, None, f"Translation error: {e}"
+
+# --- Semantic Embedding Search (Sentence Transformers) ---
+def get_semantic_embedding(text):
+    """
+    Returns a vector embedding for the given text using Sentence Transformers if available, else None.
+    """
+    try:
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+        return model.encode([text])[0]
+    except Exception:
+        return None
+
+# --- Smart Semantic Q&A over Documents ---
+def semantic_doc_qa(question, doc_text):
+    """
+    Answers a question over a document using semantic embedding search if possible, else TF-IDF.
+    Returns the best matching answer span or None.
+    """
+    try:
+        # Split doc into sentences/paragraphs
+        import re
+        chunks = re.split(r'(?<=[.!?])\s+', doc_text)
+        # Try embedding-based search
+        q_emb = get_semantic_embedding(question)
+        if q_emb is not None:
+            from sentence_transformers import util
+            chunk_embs = [get_semantic_embedding(c) for c in chunks]
+            sims = util.cos_sim([q_emb], chunk_embs)[0].tolist()
+            idx = sims.index(max(sims))
+            return chunks[idx]
         else:
-            return "I don't have your location yet."
-    # 6. Local time (before intent)
-    if username and any(q in msg_lower for q in ["what time is it", "what's the time", "current time", "local time"]):
-        loc = get_user_location_from_file(username)
-        if loc:
-            return get_local_time(loc)
-        else:
-            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            return f"I don't have your location, but my current time is {now}."
-    # 7. Weather (before intent)
-    if username and ("weather" in msg_lower or "what's the weather" in msg_lower or "what is the weather" in msg_lower):
-        loc = get_user_location_from_file(username)
-        if loc:
-            return get_weather(loc)
-        else:
-            return "I don't have your location yet."
-    # 8. Intent classification (after all special cases)
-    intent = get_intent_response(msg)
-    if intent:
-        return intent
-    # 9. Knowledge base
-    kb = get_from_knowledge_base(msg)
-    if kb:
-        return kb
-    # 10. Google fallback
+            # Fallback: TF-IDF
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            vectorizer = TfidfVectorizer().fit([question] + chunks)
+            vectors = vectorizer.transform([question] + chunks)
+            sims = (vectors[0:1] @ vectors[1:].T).toarray()[0]
+            idx = sims.argmax()
+            return chunks[idx]
+    except Exception:
+        return None
+
+# --- LLM Fallback (OpenAI/Gemini/Local) ---
+def llm_fallback(query, context=None):
+    """
+    Uses an LLM API (OpenAI, Gemini, or local) to answer the query, optionally with context.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    try:
+        import openai
+        openai.api_key = api_key
+        prompt = f"Context: {context}\n\nUser: {query}\nAI: " if context else query
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "system", "content": "You are a helpful, expert AI assistant."},
+                      {"role": "user", "content": prompt}]
+        )
+        return response['choices'][0]['message']['content'].strip()
+    except Exception:
+        return None
+
+# --- Code Explanation and Inline Suggestion ---
+def explain_code(code, language='python'):
+    """
+    Uses LLM to explain code and suggest improvements.
+    """
+    explanation = llm_fallback(f"Explain this {language} code and suggest improvements:\n{code}")
+    return explanation or "Code explanation unavailable."
+
+# --- Enhanced get_response with smarter routing ---
+def get_response(msg, username=None, file_context=None):
+    """
+    Main response router: math, image, file, code, speech, intent/KB, semantic doc Q&A, LLM fallback, Google.
+    Now uses semantic embedding, LLM fallback, and memory/context.
+    """
+    msg_norm = normalize_grammar(msg)
+    # 1. Math
+    math_reply = handle_math(msg_norm)
+    if math_reply:
+        return math_reply
+    # 2. Image generation
+    if any(w in msg_norm for w in ["draw", "generate image", "create image", "picture", "art"]):
+        return generate_image_from_prompt(msg)
+    # 3. File Q&A (if file_context provided)
+    if file_context:
+        content, err = get_uploaded_file_content(file_context)
+        if content:
+            # Use semantic_doc_qa
+            answer = semantic_doc_qa(msg, content)
+            if answer:
+                return f"From your file: {answer}"
+            # fallback: return first 500 chars
+            return f"File content: {content[:500]}..."
+        elif err:
+            return err
+    # 4. Code execution/explanation
+    if any(w in msg_norm for w in ["run code", "execute code", "code:", "explain code", "suggest code"]):
+        lang = extract_language(msg_norm)
+        code_match = re.search(r'```([\w\+\#]*)\n([\s\S]+?)```', msg)
+        code = code_match.group(2) if code_match else msg
+        if "explain" in msg_norm or "suggest" in msg_norm:
+            return explain_code(code, lang)
+        output, err = run_code(code, lang)
+        if output:
+            return f"Output:\n{output}"
+        elif err:
+            return f"Error:\n{err}"
+    # 5. Speech
+    topic, tone, audience, length = extract_speech_request(msg_norm)
+    if topic:
+        # Use generator API or LLM
+        speech = llm_fallback(f"Write a {tone or ''} speech about {topic} for {audience or 'a general audience'} of {length or 'medium'} length.")
+        return speech or "Speech generation unavailable."
+    # 6. Intent/KB
+    intent_reply = get_intent_response(msg)
+    if intent_reply:
+        return intent_reply
+    kb_reply = get_from_knowledge_base(msg)
+    if kb_reply:
+        return kb_reply
+    # 7. Conversation memory/context
+    if username:
+        recent = get_recent_conversation(username, n=5)
+        if recent:
+            context = '\n'.join([f"User: {r['user_msg']}\nAI: {r['bot_reply']}" for r in recent])
+            mem_reply = llm_fallback(msg, context=context)
+            if mem_reply:
+                return mem_reply
+    # 8. LLM fallback
+    llm_reply = llm_fallback(msg)
+    if llm_reply:
+        return llm_reply
+    # 9. Google fallback
     return ask_google(msg)
 
+# --- Self-improvement hook (logs unhandled queries for future training) ---
+def log_unhandled_query(msg, username=None):
+    try:
+        with open("unhandled_queries.log", "a", encoding="utf-8") as f:
+            f.write(f"{time.time()}\t{username or ''}\t{msg}\n")
+    except Exception:
+        pass
+
+UPLOADS_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
+
 def get_uploaded_file_content(filename):
+    """
+    Loads and extracts content from uploaded files (text, csv, py, pdf, docx, images, xlsx).
+    Returns (content, error) tuple. Used for file Q&A and semantic_doc_qa.
+    """
     filepath = os.path.join(UPLOADS_DIR, filename)
     if not os.path.exists(filepath):
         return None, "File not found."
@@ -941,28 +1002,37 @@ def get_uploaded_file_content(filename):
         elif filename.lower().endswith('.py'):
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 return f.read(), None
+        elif filename.lower().endswith('.pdf'):
+            text, tables, err = extract_text_from_pdf(filepath)
+            if text and tables:
+                return text + "\n\nTables:\n" + "\n\n".join(tables), None
+            elif text:
+                return text, None
+            else:
+                return None, err
+        elif filename.lower().endswith('.docx'):
+            text, tables, err = extract_text_from_docx(filepath)
+            if text and tables:
+                return text + "\n\nTables:\n" + "\n\n".join(tables), None
+            elif text:
+                return text, None
+            else:
+                return None, err
+        elif filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+            text, err = extract_text_from_image(filepath)
+            return text, err
+        elif filename.lower().endswith('.xlsx'):
+            text, tables, err = extract_text_from_xlsx(filepath)
+            if text and tables:
+                return text + "\n\nTables:\n" + "\n\n".join(tables), None
+            elif text:
+                return text, None
+            else:
+                return None, err
         else:
             return None, "Unsupported file type for Q&A."
     except Exception as e:
         return None, f"Error reading file: {e}"
-
-# Optional CLI mode
-if __name__ == "__main__":
-    import sys
-    if "--cli" in sys.argv:
-        start_generator_api()
-        print("DIZI AI (CLI Mode). Type 'quit' to exit.")
-        username = input("Enter your name: ").strip().capitalize()
-        update_user_data(username)
-        while True:
-            msg = input(f"{username}: ")
-            if msg.lower() == "quit":
-                break
-            update_user_questions(username, msg)
-            reply = get_response(msg, username=username)
-            print("DIZI:", reply)
-
-UPLOADS_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
 
 
 

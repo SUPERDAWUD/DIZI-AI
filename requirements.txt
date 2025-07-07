@@ -9,4 +9,9 @@ Pillow
 replicate
 pytz
 numpy
+PyPDF2
+python-docx
+pytesseract
+Pillow
+textblob
 
