@@ -21,6 +21,9 @@ import contextlib
 import tempfile
 import shutil
 
+# Ensure UPLOADS_DIR is defined at the top for all functions
+UPLOADS_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
+
 # Load keys
 load_dotenv()
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
@@ -972,67 +975,271 @@ def get_response(msg, username=None, file_context=None):
     # 9. Google fallback
     return ask_google(msg)
 
-# --- Self-improvement hook (logs unhandled queries for future training) ---
-def log_unhandled_query(msg, username=None):
-    try:
-        with open("unhandled_queries.log", "a", encoding="utf-8") as f:
-            f.write(f"{time.time()}\t{username or ''}\t{msg}\n")
-    except Exception:
-        pass
-
-UPLOADS_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
-
+# Ensure get_uploaded_file_content is defined only once and before all usages
 def get_uploaded_file_content(filename):
     """
-    Loads and extracts content from uploaded files (text, csv, py, pdf, docx, images, xlsx).
-    Returns (content, error) tuple. Used for file Q&A and semantic_doc_qa.
+    Retrieves and returns the content of an uploaded file by filename.
+    Supports PDF, DOCX, XLSX, and image files. Returns (content, error).
     """
     filepath = os.path.join(UPLOADS_DIR, filename)
     if not os.path.exists(filepath):
         return None, "File not found."
-    mime, _ = mimetypes.guess_type(filepath)
     try:
-        if mime and mime.startswith('text'):
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                return f.read(), None
-        elif filename.lower().endswith('.csv'):
-            import pandas as pd
-            df = pd.read_csv(filepath)
-            return df.head(10).to_string(), None
-        elif filename.lower().endswith('.py'):
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                return f.read(), None
-        elif filename.lower().endswith('.pdf'):
-            text, tables, err = extract_text_from_pdf(filepath)
-            if text and tables:
-                return text + "\n\nTables:\n" + "\n\n".join(tables), None
-            elif text:
-                return text, None
+        # PDF or image file
+        if filename.lower().endswith(('.pdf', '.png', '.jpg', '.jpeg', '.gif')):
+            # Extract text from PDF or image
+            if filename.lower().endswith('.pdf'):
+                return extract_text_from_pdf(filepath)
             else:
-                return None, err
+                return extract_text_from_image(filepath)
+        # DOCX file
         elif filename.lower().endswith('.docx'):
-            text, tables, err = extract_text_from_docx(filepath)
-            if text and tables:
-                return text + "\n\nTables:\n" + "\n\n".join(tables), None
-            elif text:
-                return text, None
-            else:
-                return None, err
-        elif filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
-            text, err = extract_text_from_image(filepath)
-            return text, err
+            return extract_text_from_docx(filepath)
+        # XLSX file
         elif filename.lower().endswith('.xlsx'):
-            text, tables, err = extract_text_from_xlsx(filepath)
-            if text and tables:
-                return text + "\n\nTables:\n" + "\n\n".join(tables), None
-            elif text:
-                return text, None
-            else:
-                return None, err
-        else:
-            return None, "Unsupported file type for Q&A."
+            return extract_text_from_xlsx(filepath)
+        return None, "Unsupported file type."
     except Exception as e:
         return None, f"Error reading file: {e}"
+
+# --- Multi-Document/Context Q&A ---
+def get_all_uploaded_files():
+    """
+    Returns a list of all uploaded file names in the uploads directory.
+    """
+    try:
+        return [f for f in os.listdir(UPLOADS_DIR) if os.path.isfile(os.path.join(UPLOADS_DIR, f))]
+    except Exception:
+        return []
+
+def multi_file_semantic_qa(question):
+    """
+    Searches all uploaded files for the best answer to the question using semantic_doc_qa.
+    Returns the best answer and file name.
+    """
+    best_score = 0
+    best_answer = None
+    best_file = None
+    for fname in get_all_uploaded_files():
+        content, err = get_uploaded_file_content(fname)
+        if content:
+            answer = semantic_doc_qa(question, content)
+            if answer:
+                # Score by semantic similarity
+                from sklearn.feature_extraction.text import TfidfVectorizer
+                vectorizer = TfidfVectorizer().fit([question, answer])
+                vectors = vectorizer.transform([question, answer])
+                score = (vectors[0:1] @ vectors[1:2].T).toarray()[0][0]
+                if score > best_score:
+                    best_score = score
+                    best_answer = answer
+                    best_file = fname
+    if best_answer:
+        return f"From file '{best_file}': {best_answer}"
+    return None
+
+# --- Tool/Plugin Execution (WolframAlpha, Wikipedia, Calculator, etc.) ---
+def call_tool_plugin(query):
+    """
+    Calls external APIs/tools for advanced queries (math, facts, code search, etc.).
+    Returns the tool result or None.
+    """
+    # Example: WolframAlpha
+    if 'calculate' in query or 'math' in query or 'solve' in query:
+        appid = os.getenv('WOLFRAMALPHA_APPID')
+        if appid:
+            try:
+                import wolframalpha
+                client = wolframalpha.Client(appid)
+                res = client.query(query)
+                answer = next(res.results).text
+                return f"WolframAlpha: {answer}"
+            except Exception:
+                pass
+    # Example: Wikipedia
+    if 'wikipedia' in query or 'who is' in query or 'what is' in query:
+        try:
+            import wikipedia
+            summary = wikipedia.summary(query, sentences=2)
+            return f"Wikipedia: {summary}"
+        except Exception:
+            pass
+    # Add more plugins/tools as needed
+    return None
+
+# --- Advanced Code Analysis: Bug Detection & Suggestions ---
+def analyze_code(code, language='python'):
+    """
+    Uses LLM and static analysis to find bugs, suggest improvements, and explain errors.
+    """
+    # LLM-based suggestion
+    suggestion = llm_fallback(f"Find bugs, explain errors, and suggest improvements for this {language} code:\n{code}")
+    # Static analysis (Python only)
+    static_result = None
+    if language == 'python':
+        try:
+            import ast
+            ast.parse(code)
+            static_result = "No syntax errors detected."
+        except Exception as e:
+            static_result = f"Static analysis: {e}"
+    return (suggestion or "No LLM suggestion."), static_result
+
+# --- Continual Learning: Log User Feedback & Unhandled Queries ---
+def log_user_feedback(username, query, feedback):
+    try:
+        with open("user_feedback.log", "a", encoding="utf-8") as f:
+            f.write(f"{time.time()}\t{username}\t{query}\t{feedback}\n")
+    except Exception:
+        pass
+
+# --- Advanced Memory: Long-Term User Preferences ---
+def save_user_preference(username, key, value):
+    """
+    Saves a user preference (e.g., language, style, favorite tools).
+    """
+    pref_file = "user_preferences.json"
+    try:
+        if os.path.exists(pref_file):
+            with open(pref_file, "r", encoding="utf-8") as f:
+                prefs = json.load(f)
+        else:
+            prefs = {}
+        if username not in prefs:
+            prefs[username] = {}
+        prefs[username][key] = value
+        atomic_write_json(prefs, pref_file)
+    except Exception:
+        pass
+
+def get_user_preference(username, key):
+    pref_file = "user_preferences.json"
+    try:
+        with open(pref_file, "r", encoding="utf-8") as f:
+            prefs = json.load(f)
+        return prefs.get(username, {}).get(key)
+    except Exception:
+        return None
+
+# --- Voice Input/Output (Speech-to-Text & Text-to-Speech) ---
+def speech_to_text(audio_path):
+    """
+    Converts speech audio to text using SpeechRecognition and Google API.
+    """
+    try:
+        import speech_recognition as sr
+        r = sr.Recognizer()
+        with sr.AudioFile(audio_path) as source:
+            audio = r.record(source)
+        return r.recognize_google(audio)
+    except Exception as e:
+        return f"Speech recognition error: {e}"
+
+def text_to_speech(text, output_path):
+    """
+    Converts text to speech audio using gTTS.
+    """
+    try:
+        from gtts import gTTS
+        tts = gTTS(text)
+        tts.save(output_path)
+        return output_path
+    except Exception as e:
+        return f"Text-to-speech error: {e}"
+
+# --- Emotion & Intent Detection (Advanced) ---
+def detect_emotion(text):
+    """
+    Detects emotion in text using text2emotion (if available).
+    Returns a dict of emotions.
+    """
+    try:
+        import text2emotion as t2e
+        return t2e.get_emotion(text)
+    except Exception:
+        return {}
+
+# --- Enhanced get_response with all new capabilities ---
+def get_response(msg, username=None, file_context=None, all_files=False, feedback=None):
+    msg_norm = normalize_grammar(msg)
+    # 0. Tool/plugin execution
+    tool_result = call_tool_plugin(msg_norm)
+    if tool_result:
+        return tool_result
+    # 1. Math
+    math_reply = handle_math(msg_norm)
+    if math_reply:
+        return math_reply
+    # 2. Image generation
+    if any(w in msg_norm for w in ["draw", "generate image", "create image", "picture", "art"]):
+        return generate_image_from_prompt(msg)
+    # 3. Multi-file Q&A
+    if all_files:
+        answer = multi_file_semantic_qa(msg)
+        if answer:
+            return answer
+    # 4. File Q&A (if file_context provided)
+    if file_context:
+        content, err = get_uploaded_file_content(file_context)
+        if content:
+            answer = semantic_doc_qa(msg, content)
+            if answer:
+                return f"From your file: {answer}"
+            return f"File content: {content[:500]}..."
+        elif err:
+            return err
+    # 5. Code execution/analysis
+    if any(w in msg_norm for w in ["run code", "execute code", "code:", "explain code", "suggest code", "analyze code", "find bug"]):
+        lang = extract_language(msg_norm)
+        code_match = re.search(r'```([\w\+\#]*)\n([\s\S]+?)```', msg)
+        code = code_match.group(2) if code_match else msg
+        if "explain" in msg_norm or "suggest" in msg_norm or "analyze" in msg_norm or "find bug" in msg_norm:
+            suggestion, static_result = analyze_code(code, lang)
+            return f"Suggestion: {suggestion}\n{static_result or ''}"
+        output, err = run_code(code, lang)
+        if output:
+            return f"Output:\n{output}"
+        elif err:
+            return f"Error:\n{err}"
+    # 6. Speech
+    topic, tone, audience, length = extract_speech_request(msg_norm)
+    if topic:
+        speech = llm_fallback(f"Write a {tone or ''} speech about {topic} for {audience or 'a general audience'} of {length or 'medium'} length.")
+        return speech or "Speech generation unavailable."
+    # 7. Intent/KB
+    intent_reply = get_intent_response(msg)
+    if intent_reply:
+        return intent_reply
+    kb_reply = get_from_knowledge_base(msg)
+    if kb_reply:
+        return kb_reply
+    # 8. Memory/context
+    if username:
+        recent = get_recent_conversation(username, n=5)
+        if recent:
+            context = '\n'.join([f"User: {r['user_msg']}\nAI: {r['bot_reply']}" for r in recent])
+            mem_reply = llm_fallback(msg, context=context)
+            if mem_reply:
+                return mem_reply
+    # 9. LLM fallback
+    llm_reply = llm_fallback(msg)
+    if llm_reply:
+        return llm_reply
+    # 10. Google fallback
+    return ask_google(msg)
+
+# --- UI/Frontend hooks (for advanced markdown/code rendering, file preview, plugin panel, speech/typing toggle) ---
+# (To be implemented in the web UI/frontend)
+#
+# Example (to add in index.html and JS):
+# - Add a toggle button or switch labeled "🎤 Voice" and "⌨️ Typing" above the chat input box.
+# - Default to typing mode (text input enabled, microphone disabled).
+# - When user clicks the voice toggle, enable microphone and use Web Speech API or send audio to /speech endpoint.
+# - When user clicks typing, disable microphone and focus text input.
+# - Show current mode visually (highlighted button or icon).
+# - On backend, use speech_to_text for audio, normal text for typing.
+#
+# Backend is ready for both modes. UI/JS must implement the toggle and default.
 
 
 
