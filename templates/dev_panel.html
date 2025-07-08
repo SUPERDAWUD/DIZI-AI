@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Developer Panel</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        .dev-panel-section { margin-bottom: 2em; }
+        textarea { width: 100%; min-height: 100px; }
+        .output-box { background: #222; color: #0f0; padding: 1em; border-radius: 5px; margin-top: 1em; }
+    </style>
+</head>
+<body>
+    <div class="dev-panel-container">
+        <h2>Developer Mode Panel</h2>
+        <a href="/">Back to Chat</a>
+        <div class="dev-panel-section">
+            <h3>Run Arbitrary Code</h3>
+            <form id="dev-exec-form">
+                <label>Language:
+                    <select name="language">
+                        <option value="python">Python</option>
+                    </select>
+                </label><br>
+                <textarea name="code" placeholder="Enter code to execute..."></textarea><br>
+                <button type="submit">Run Code</button>
+            </form>
+            <div id="dev-exec-output" class="output-box" style="display:none;"></div>
+        </div>
+        <div class="dev-panel-section">
+            <h3>Self-Modify Code</h3>
+            <form id="self-modify-form">
+                <input type="text" name="target_file" placeholder="Target file (e.g. chat.py)" required><br>
+                <textarea name="new_code" placeholder="Paste new code here..."></textarea><br>
+                <button type="submit">Overwrite File</button>
+            </form>
+            <div id="self-modify-output" class="output-box" style="display:none;"></div>
+        </div>
+    </div>
+    <script>
+    // Dev exec form
+    document.getElementById('dev-exec-form').onsubmit = async function(e) {
+        e.preventDefault();
+        const form = e.target;
+        const data = new FormData(form);
+        const res = await fetch('/dev/exec', { method: 'POST', body: data });
+        const out = await res.json();
+        const box = document.getElementById('dev-exec-output');
+        box.style.display = 'block';
+        box.textContent = out.output || out.error || 'No output.';
+    };
+    // Self-modify form
+    document.getElementById('self-modify-form').onsubmit = async function(e) {
+        e.preventDefault();
+        const form = e.target;
+        const data = new FormData(form);
+        const res = await fetch('/dev/self-modify', { method: 'POST', body: data });
+        const out = await res.json();
+        const box = document.getElementById('self-modify-output');
+        box.style.display = 'block';
+        box.textContent = out.success ? 'File overwritten successfully.' : (out.error || 'Failed.');
+    };
+    </script>
+</body>
+</html>

@@ -27,7 +27,27 @@
       <input type="text" id="user-input" placeholder="Type your message..." />
       <button onclick="sendMessage()">Send</button>
     </div>
+    <!-- File upload section -->
+    <div class="file-upload-section">
+        <form id="file-upload-form" enctype="multipart/form-data" method="post" action="/upload">
+            <input type="file" id="file-input" name="file" style="display:none;" onchange="document.getElementById('file-name').textContent = this.files[0]?.name || ''">
+            <button type="button" onclick="document.getElementById('file-input').click()">Choose File</button>
+            <span id="file-name"></span>
+            <button type="submit">Add</button>
+        </form>
+    </div>
+    <!-- Dev Mode button -->
+    <div class="dev-mode-section" style="margin-top:1em; text-align:right;">
+        <a href="/dev-login"><button id="dev-mode-btn" style="background:#222;color:#fff;padding:0.5em 1em;border-radius:5px;">Dev Mode</button></a>
+    </div>
   </div>
+  <div class="sidebar" id="sidebar" style="position:fixed;left:0;top:0;bottom:0;width:220px;background:#181818;color:#fff;overflow-y:auto;padding:1em 0;z-index:10;">
+        <h3 style="text-align:center;">Previous Chats</h3>
+        <ul id="chat-list" style="list-style:none;padding:0;margin:0;"></ul>
+    </div>
+    <div style="margin-left:230px;">
+        <!-- Main chat UI goes here -->
+    </div>
 
   <script>
     let USER = null;
@@ -86,6 +106,26 @@
       chatBox.appendChild(messageDiv);
       chatBox.scrollTop = chatBox.scrollHeight;
     }
-  </script>
+
+    // Sidebar chat history logic
+    async function loadChats() {
+        const res = await fetch('/api/chats');
+        const chats = await res.json();
+        const list = document.getElementById('chat-list');
+        list.innerHTML = '';
+        chats.forEach(chat => {
+            const li = document.createElement('li');
+            li.textContent = chat.title || chat.timestamp;
+            li.style.cursor = 'pointer';
+            li.onclick = () => loadChat(chat.id);
+            list.appendChild(li);
+        });
+    }
+    async function loadChat(id) {
+        // Implement chat loading logic (fetch and display messages)
+        // ...
+    }
+    loadChats();
+    </script>
 </body>
 </html>

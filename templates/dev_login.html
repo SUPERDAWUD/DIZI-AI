@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Dev Mode Login</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="dev-login-container">
+        <h2>Developer Mode Login</h2>
+        {% if error %}<div class="error">{{ error }}</div>{% endif %}
+        <form method="post">
+            <input type="password" name="password" placeholder="Enter Dev Mode Password" required>
+            <button type="submit">Login</button>
+        </form>
+        <a href="/">Back to Chat</a>
+    </div>
+</body>
+</html>

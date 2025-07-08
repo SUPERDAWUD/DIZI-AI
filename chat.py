@@ -20,6 +20,25 @@ import io
 import contextlib
 import tempfile
 import shutil
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session
+from functools import wraps
+
+# --- Flask App Initialization (ensure only one app instance) ---
+if 'app' not in globals():
+    app = Flask(__name__)
+    app.secret_key = os.getenv('FLASK_SECRET_KEY', 'devsecret')
+
+# --- Dev Mode Password (ensure defined) ---
+DEV_MODE_PASSWORD = os.getenv('DEV_MODE_PASSWORD', 'supersecret')
+
+# --- Dev Mode Decorator (ensure defined) ---
+def dev_mode_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('dev_mode'):
+            return redirect(url_for('dev_login'))
+        return f(*args, **kwargs)
+    return decorated_function
 
 # Ensure UPLOADS_DIR is defined at the top for all functions
 UPLOADS_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
@@ -153,10 +172,11 @@ def update_user_questions(username, question, max_questions=100):
 
 def get_user_location(ip_address):
     """
-    Gets location info (city, region, country, lat, lon) from an IP address using ip-api.com.
+    Gets location info (city, region, country, lat, lon) from an IP address using multiple APIs for robustness.
     Returns a dict with location info or None if lookup fails.
     """
     try:
+        # Try ip-api.com first
         resp = requests.get(f"http://ip-api.com/json/{ip_address}")
         if resp.ok:
             data = resp.json()
@@ -168,6 +188,18 @@ def get_user_location(ip_address):
                     "lat": data.get("lat"),
                     "lon": data.get("lon")
                 }
+        # Fallback: ipinfo.io
+        resp = requests.get(f"https://ipinfo.io/{ip_address}/json")
+        if resp.ok:
+            data = resp.json()
+            loc = data.get('loc', '').split(',')
+            return {
+                "city": data.get("city"),
+                "region": data.get("region"),
+                "country": data.get("country"),
+                "lat": float(loc[0]) if len(loc) == 2 else None,
+                "lon": float(loc[1]) if len(loc) == 2 else None
+            }
     except Exception:
         pass
     return None
@@ -655,8 +687,19 @@ def handle_math(msg):
             msg = msg[len(prefix):].strip()
             break
     try:
+        # Only allow valid math expressions (digits, operators, parentheses, decimal points, spaces)
         if re.fullmatch(r"[0-9\.\+\-\*/\(\)\s\^]+", msg):
-            result = eval(msg, {"__builtins__": None}, {})
+            # Use sympy to safely evaluate arithmetic expressions
+            result = sympy.sympify(msg).evalf()
+            # If result is an integer, cast to int for cleaner output
+            if result == int(result):
+                result = int(result)
+            return f"The answer is {result}"
+        # If the message is a single arithmetic expression (e.g. 1+1), also handle it
+        if re.fullmatch(r"[0-9]+[\+\-\*/][0-9]+", msg.replace(' ', '')):
+            result = sympy.sympify(msg).evalf()
+            if result == int(result):
+                result = int(result)
             return f"The answer is {result}"
         if msg.startswith("solve"):
             expr = msg.replace("solve", "").strip()
@@ -910,12 +953,32 @@ def explain_code(code, language='python'):
     return explanation or "Code explanation unavailable."
 
 # --- Enhanced get_response with smarter routing ---
-def get_response(msg, username=None, file_context=None):
-    """
-    Main response router: math, image, file, code, speech, intent/KB, semantic doc Q&A, LLM fallback, Google.
-    Now uses semantic embedding, LLM fallback, and memory/context.
-    """
+def get_response(msg, username=None, file_context=None, all_files=False, feedback=None):
     msg_norm = normalize_grammar(msg)
+    # 0. Tool/plugin execution
+    tool_result = call_tool_plugin(msg_norm)
+    if tool_result:
+        return tool_result
+    # 0.5. Location Q&A
+    if any(q in msg_norm for q in ["where am i", "what's my location", "where are we", "my location", "where is my location"]):
+        if username:
+            loc = get_user_location_from_file(username)
+            if loc:
+                return f"Your location: {loc.get('city', 'Unknown')}, {loc.get('region', '')}, {loc.get('country', '')} (lat: {loc.get('lat', '?')}, lon: {loc.get('lon', '?')})"
+            else:
+                return "Sorry, I couldn't determine your location."
+        else:
+            return "I need your username to look up your location."
+    # 0.6. Local time Q&A
+    if any(q in msg_norm for q in ["what time is it", "what's the time", "local time", "current time", "my time", "what time is it here"]):
+        if username:
+            loc = get_user_location_from_file(username)
+            if loc:
+                return get_local_time(loc)
+            else:
+                return "Sorry, I couldn't determine your location to get the time."
+        else:
+            return "I need your username to look up your local time."
     # 1. Math
     math_reply = handle_math(msg_norm)
     if math_reply:
@@ -923,44 +986,47 @@ def get_response(msg, username=None, file_context=None):
     # 2. Image generation
     if any(w in msg_norm for w in ["draw", "generate image", "create image", "picture", "art"]):
         return generate_image_from_prompt(msg)
-    # 3. File Q&A (if file_context provided)
+    # 3. Multi-file Q&A
+    if all_files:
+        answer = multi_file_semantic_qa(msg)
+        if answer:
+            return answer
+    # 4. File Q&A (if file_context provided)
     if file_context:
         content, err = get_uploaded_file_content(file_context)
         if content:
-            # Use semantic_doc_qa
             answer = semantic_doc_qa(msg, content)
             if answer:
                 return f"From your file: {answer}"
-            # fallback: return first 500 chars
             return f"File content: {content[:500]}..."
         elif err:
             return err
-    # 4. Code execution/explanation
-    if any(w in msg_norm for w in ["run code", "execute code", "code:", "explain code", "suggest code"]):
+    # 5. Code execution/analysis
+    if any(w in msg_norm for w in ["run code", "execute code", "code:", "explain code", "suggest code", "analyze code", "find bug"]):
         lang = extract_language(msg_norm)
         code_match = re.search(r'```([\w\+\#]*)\n([\s\S]+?)```', msg)
         code = code_match.group(2) if code_match else msg
-        if "explain" in msg_norm or "suggest" in msg_norm:
-            return explain_code(code, lang)
+        if "explain" in msg_norm or "suggest" in msg_norm or "analyze" in msg_norm or "find bug" in msg_norm:
+            suggestion, static_result = analyze_code(code, lang)
+            return f"Suggestion: {suggestion}\n{static_result or ''}"
         output, err = run_code(code, lang)
         if output:
             return f"Output:\n{output}"
         elif err:
             return f"Error:\n{err}"
-    # 5. Speech
+    # 6. Speech
     topic, tone, audience, length = extract_speech_request(msg_norm)
     if topic:
-        # Use generator API or LLM
         speech = llm_fallback(f"Write a {tone or ''} speech about {topic} for {audience or 'a general audience'} of {length or 'medium'} length.")
         return speech or "Speech generation unavailable."
-    # 6. Intent/KB
+    # 7. Intent/KB
     intent_reply = get_intent_response(msg)
     if intent_reply:
         return intent_reply
     kb_reply = get_from_knowledge_base(msg)
     if kb_reply:
         return kb_reply
-    # 7. Conversation memory/context
+    # 8. Memory/context
     if username:
         recent = get_recent_conversation(username, n=5)
         if recent:
@@ -968,11 +1034,11 @@ def get_response(msg, username=None, file_context=None):
             mem_reply = llm_fallback(msg, context=context)
             if mem_reply:
                 return mem_reply
-    # 8. LLM fallback
+    # 9. LLM fallback
     llm_reply = llm_fallback(msg)
     if llm_reply:
         return llm_reply
-    # 9. Google fallback
+    # 10. Google fallback
     return ask_google(msg)
 
 # Ensure get_uploaded_file_content is defined only once and before all usages
@@ -1166,6 +1232,26 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
     tool_result = call_tool_plugin(msg_norm)
     if tool_result:
         return tool_result
+    # 0.5. Location Q&A
+    if any(q in msg_norm for q in ["where am i", "what's my location", "where are we", "my location", "where is my location"]):
+        if username:
+            loc = get_user_location_from_file(username)
+            if loc:
+                return f"Your location: {loc.get('city', 'Unknown')}, {loc.get('region', '')}, {loc.get('country', '')} (lat: {loc.get('lat', '?')}, lon: {loc.get('lon', '?')})"
+            else:
+                return "Sorry, I couldn't determine your location."
+        else:
+            return "I need your username to look up your location."
+    # 0.6. Local time Q&A
+    if any(q in msg_norm for q in ["what time is it", "what's the time", "local time", "current time", "my time", "what time is it here"]):
+        if username:
+            loc = get_user_location_from_file(username)
+            if loc:
+                return get_local_time(loc)
+            else:
+                return "Sorry, I couldn't determine your location to get the time."
+        else:
+            return "I need your username to look up your local time."
     # 1. Math
     math_reply = handle_math(msg_norm)
     if math_reply:
@@ -1228,18 +1314,85 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
     # 10. Google fallback
     return ask_google(msg)
 
-# --- UI/Frontend hooks (for advanced markdown/code rendering, file preview, plugin panel, speech/typing toggle) ---
-# (To be implemented in the web UI/frontend)
-#
-# Example (to add in index.html and JS):
-# - Add a toggle button or switch labeled "🎤 Voice" and "⌨️ Typing" above the chat input box.
-# - Default to typing mode (text input enabled, microphone disabled).
-# - When user clicks the voice toggle, enable microphone and use Web Speech API or send audio to /speech endpoint.
-# - When user clicks typing, disable microphone and focus text input.
-# - Show current mode visually (highlighted button or icon).
-# - On backend, use speech_to_text for audio, normal text for typing.
-#
-# Backend is ready for both modes. UI/JS must implement the toggle and default.
+# --- API Endpoints ---
+@app.route('/api/chats')
+def api_chats():
+    try:
+        if os.path.exists(CONVO_HISTORY_FILE):
+            with open(CONVO_HISTORY_FILE, 'r', encoding='utf-8') as f:
+                history = json.load(f)
+        else:
+            history = []
+        # Group by session or user, or just show last N chats
+        chats = []
+        for i, entry in enumerate(history[-50:]):
+            chats.append({
+                'id': i,
+                'title': entry.get('user_msg', '')[:30] or f'Chat {i+1}',
+                'timestamp': entry.get('timestamp', '')
+            })
+        return jsonify(chats)
+    except Exception as e:
+        return jsonify([])
+
+@app.route('/dev', methods=['GET', 'POST'])
+def dev():
+    # If not logged in, show login form as subpage
+    if not session.get('dev_mode'):
+        error = None
+        if request.method == 'POST':
+            password = request.form.get('password')
+            if password == DEV_MODE_PASSWORD:
+                session['dev_mode'] = True
+                return redirect(url_for('dev'))
+            error = 'Incorrect password'
+        return render_template('dev_login.html', error=error)
+    # If logged in, show dev panel as subpage
+    return render_template('dev_panel.html')
+
+@app.route('/dev/exec', methods=['POST'])
+@dev_mode_required
+def dev_exec():
+    code = request.form.get('code')
+    lang = request.form.get('language', 'python')
+    # Allow advanced code execution, model retraining, etc.
+    if lang == 'python':
+        output, err = run_python_code(code)
+        return jsonify({'output': output, 'error': err})
+    # Add more advanced ML/hacking tools here as needed
+    return jsonify({'error': 'Language not supported in dev mode.'})
+
+# --- Self-improving/Auto-coding ability ---
+def self_modify_code(new_code, target_file):
+    """
+    Allows the chatbot to write correct code to itself (self-improvement).
+    Only available in dev mode for security.
+    """
+    try:
+        with open(target_file, 'w', encoding='utf-8') as f:
+            f.write(new_code)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+@app.route('/dev/self-modify', methods=['POST'])
+@dev_mode_required
+def dev_self_modify():
+    new_code = request.form.get('new_code')
+    target_file = request.form.get('target_file')
+    success, err = self_modify_code(new_code, target_file)
+    return jsonify({'success': success, 'error': err})
+
+@app.before_request
+def auto_update_user_location():
+    if request.endpoint not in ('static',):
+        username = session.get('username')
+        if username:
+            ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+            update_user_location(username, ip)
+
+if __name__ == "__main__":
+    app.run(debug=True)
 
 
 
