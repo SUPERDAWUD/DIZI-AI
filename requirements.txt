@@ -14,4 +14,12 @@ python-docx
 pytesseract
 Pillow
 textblob
+scikit-learn
+gtts
+tabula-py
+pandas
+sentence-transformers
+openai
+text2emotion
+werkzeug
 

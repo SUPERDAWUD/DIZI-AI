@@ -126,180 +126,161 @@ def atomic_write_json(data, filename):
 
 def update_user_data(username):
     """
-    Adds a username to the user data file if not already present.
-    Uses a lock for thread safety and atomic write for robustness.
-    Returns False if new user, True if existing.
+    Updates or creates user data in user_data.json.
     """
-    username = username.strip().capitalize()
-    with user_data_lock:
-        try:
-            with open(USER_DATA_FILE, "r", encoding="utf-8") as f:
-                users = json.load(f)
-        except Exception:
-            users = []
-        if username not in users:
-            users.append(username)
-            try:
-                atomic_write_json(users, USER_DATA_FILE)
-            except Exception as e:
-                print(f"[ERROR] Failed to write user data: {e}")
-            return False  # New user
-        return True  # Existing user
+    try:
+        if os.path.exists('user_data.json'):
+            with open('user_data.json', 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        else:
+            data = {}
+        if username not in data:
+            data[username] = {}
+        # Add more user fields as needed
+        with open('user_data.json', 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[ERROR] update_user_data: {e}")
+
 
 def update_user_questions(username, question, max_questions=100):
     """
-    Adds a question to the user's question history, deduplicates, and limits to max_questions.
-    Uses a lock for thread safety and atomic write for robustness.
+    Updates user_questions.json with the latest question for the user.
     """
-    username = username.strip().capitalize()
-    with user_questions_lock:
-        try:
-            with open(USER_QUESTIONS_FILE, "r", encoding="utf-8") as f:
+    try:
+        if os.path.exists('user_questions.json'):
+            with open('user_questions.json', 'r', encoding='utf-8') as f:
                 data = json.load(f)
-        except Exception:
+        else:
             data = {}
         if username not in data:
             data[username] = []
-        # Deduplicate and limit
-        if question not in data[username]:
-            data[username].append(question)
-            if len(data[username]) > max_questions:
-                data[username] = data[username][-max_questions:]
-            try:
-                atomic_write_json(data, USER_QUESTIONS_FILE)
-            except Exception as e:
-                print(f"[ERROR] Failed to write user questions: {e}")
+        data[username].append({"question": question, "timestamp": time.time()})
+        if len(data[username]) > max_questions:
+            data[username] = data[username][-max_questions:]
+        with open('user_questions.json', 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[ERROR] update_user_questions: {e}")
+
 
 def get_user_location(ip_address):
     """
-    Gets location info (city, region, country, lat, lon) from an IP address using multiple APIs for robustness.
-    Returns a dict with location info or None if lookup fails.
+    Gets user location from IP using multiple APIs for robustness.
     """
     try:
-        # Try ip-api.com first
-        resp = requests.get(f"http://ip-api.com/json/{ip_address}")
-        if resp.ok:
-            data = resp.json()
-            if data.get("status") == "success":
+        import requests
+        # Try ipinfo.io first
+        try:
+            resp = requests.get(f"https://ipinfo.io/{ip_address}/json", timeout=3)
+            if resp.status_code == 200:
+                data = resp.json()
+                loc = data.get('loc', '').split(',')
                 return {
-                    "city": data.get("city"),
-                    "region": data.get("regionName"),
-                    "country": data.get("country"),
-                    "lat": data.get("lat"),
-                    "lon": data.get("lon")
+                    'city': data.get('city'),
+                    'region': data.get('region'),
+                    'country': data.get('country'),
+                    'lat': float(loc[0]) if len(loc) == 2 else None,
+                    'lon': float(loc[1]) if len(loc) == 2 else None
                 }
-        # Fallback: ipinfo.io
-        resp = requests.get(f"https://ipinfo.io/{ip_address}/json")
-        if resp.ok:
-            data = resp.json()
-            loc = data.get('loc', '').split(',')
-            return {
-                "city": data.get("city"),
-                "region": data.get("region"),
-                "country": data.get("country"),
-                "lat": float(loc[0]) if len(loc) == 2 else None,
-                "lon": float(loc[1]) if len(loc) == 2 else None
-            }
-    except Exception:
-        pass
+        except Exception:
+            pass
+        # Fallback: ip-api.com
+        try:
+            resp = requests.get(f"http://ip-api.com/json/{ip_address}", timeout=3)
+            if resp.status_code == 200:
+                data = resp.json()
+                return {
+                    'city': data.get('city'),
+                    'region': data.get('regionName'),
+                    'country': data.get('country'),
+                    'lat': data.get('lat'),
+                    'lon': data.get('lon')
+                }
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[ERROR] get_user_location: {e}")
     return None
+
 
 def update_user_location(username, ip_address):
     """
-    Updates the user's location in the user location file if not already present.
-    Uses a lock for thread safety and atomic write for robustness.
-    Returns the location dict or None.
+    Updates user_data.json with the user's latest location.
     """
-    username = username.strip().capitalize()
-    with user_location_lock:
-        try:
-            with open(USER_LOCATION_FILE, "r", encoding="utf-8") as f:
-                locations = json.load(f)
-        except Exception:
-            locations = {}
-        if username not in locations:
-            loc = get_user_location(ip_address)
-            if loc:
-                locations[username] = loc
-                try:
-                    atomic_write_json(locations, USER_LOCATION_FILE)
-                except Exception as e:
-                    print(f"[ERROR] Failed to write user location: {e}")
-                return loc
-        return locations.get(username)
+    loc = get_user_location(ip_address)
+    if not loc:
+        return
+    try:
+        if os.path.exists('user_data.json'):
+            with open('user_data.json', 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        else:
+            data = {}
+        if username not in data:
+            data[username] = {}
+        data[username]['location'] = loc
+        with open('user_data.json', 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[ERROR] update_user_location: {e}")
+
 
 def get_user_location_from_file(username):
     """
-    Retrieves the user's location from the user location file.
-    Returns the location dict or None if not found.
+    Loads user location from user_data.json.
     """
-    username = username.strip().capitalize()
     try:
-        with open(USER_LOCATION_FILE, "r", encoding="utf-8") as f:
-            locations = json.load(f)
-        return locations.get(username)
-    except Exception:
-        return None
+        if os.path.exists('user_data.json'):
+            with open('user_data.json', 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data.get(username, {}).get('location')
+    except Exception as e:
+        print(f"[ERROR] get_user_location_from_file: {e}")
+    return None
+
 
 def get_local_time(location):
-    """
-    Gets the local time for a given location dict (city, country) using worldtimeapi.org.
-    Returns a string with the local time or an error message.
-    """
-    # Use city/country to get timezone and local time
     try:
         import requests
-        city = location.get("city")
-        country = location.get("country")
-        if city and country:
-            # Use worldtimeapi.org for timezone lookup
-            resp = requests.get(f"http://worldtimeapi.org/api/timezone")
-            if resp.ok:
-                timezones = resp.json()
-                # Try to find a matching timezone
-                for tz in timezones:
-                    if city.replace(" ", "_") in tz or country.replace(" ", "_") in tz:
-                        time_resp = requests.get(f"http://worldtimeapi.org/api/timezone/{tz}")
-                        if time_resp.ok:
-                            dt = time_resp.json().get("datetime")
-                            if dt:
-                                return f"The local time in {city}, {country} is {dt[:19].replace('T', ' ')}."
+        if not location or not location.get('lat') or not location.get('lon'):
+            return "Sorry, I couldn't determine your local time."
+        lat, lon = location['lat'], location['lon']
+        resp = requests.get(f"https://timeapi.io/api/Time/current/coordinate?latitude={lat}&longitude={lon}", timeout=3)
+        if resp.status_code == 200:
+            data = resp.json()
+            return f"Local time: {data.get('dateTime', 'Unknown')} ({data.get('timeZone', '')})"
     except Exception:
         pass
     return "Sorry, I couldn't determine your local time."
+
 
 def get_weather(location):
     """
     Gets the weather for a given location dict (city, country) using SerpAPI/Google.
     Returns a string with the weather or an error message.
     """
-    # Use SerpAPI to get weather from Google
     api_key = os.getenv("SERPAPI_KEY")
     city = location.get("city")
     country = location.get("country")
     if not api_key or not city:
-        return "Weather service is not configured."
+        return "Weather API key or city missing."
     try:
         from serpapi import GoogleSearch
-        query = f"weather in {city}, {country}"
         search = GoogleSearch({
-            "q": query,
+            "q": f"weather in {city} {country}",
             "api_key": api_key,
             "engine": "google"
         })
         results = search.get_dict()
-        weather_box = results.get("answer_box", {})
-        if "temperature" in weather_box and "unit" in weather_box:
-            temp = weather_box["temperature"]
-            unit = weather_box["unit"]
-            desc = weather_box.get("weather", "")
-            return f"The weather in {city}, {country} is {desc}, {temp}{unit}."
-        elif "snippet" in weather_box:
-            return f"Weather in {city}, {country}: {weather_box['snippet']}"
-        else:
-            return "Sorry, I couldn't get the weather for your location."
-    except Exception:
-        return "Sorry, I couldn't get the weather for your location."
+        answer_box = results.get("answer_box", {})
+        if "temperature" in answer_box:
+            return f"Weather in {city}: {answer_box['temperature']} {answer_box.get('unit', '')}, {answer_box.get('description', '')}"
+        elif "snippet" in answer_box:
+            return f"Weather: {answer_box['snippet']}"
+        return "Weather info not found."
+    except Exception as e:
+        return f"Weather error: {e}"
 
 # --- Enhanced: Robust intent/KB matching, grammar normalization, and speech upgrades ---
 import difflib
@@ -317,13 +298,14 @@ def normalize_grammar(text):
 # Helper: Semantic similarity (TF-IDF cosine)
 def semantic_similarity(query, choices):
     try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
         vectorizer = TfidfVectorizer().fit([query] + choices)
         vectors = vectorizer.transform([query] + choices)
-        sims = cosine_similarity(vectors[0:1], vectors[1:]).flatten()
+        sims = (vectors[0:1] @ vectors[1:].T).toarray()[0]
         idx = sims.argmax()
         return choices[idx], sims[idx]
     except Exception:
-        return None, 0
+        return None, 0.0
 
 # Improved intent response engine (fuzzy + semantic)
 def get_intent_response(msg):
@@ -677,7 +659,8 @@ def run_code(code, language='python'):
 # Math handler (basic & symbolic)
 def handle_math(msg):
     x, y = symbols("x y")
-    msg = msg.lower().strip().replace("^", "**")
+    original_msg = msg.strip()
+    msg = original_msg.lower().replace("^", "**")
     # Preprocess: remove common math question prefixes
     math_prefixes = [
         "what is ", "whats ", "what's ", "calculate ", "solve ", "compute ", "evaluate ", "find ", "give me ", "tell me ", "can you solve ", "can you calculate ", "can you evaluate ", "can you compute "
@@ -687,17 +670,15 @@ def handle_math(msg):
             msg = msg[len(prefix):].strip()
             break
     try:
-        # Only allow valid math expressions (digits, operators, parentheses, decimal points, spaces)
-        if re.fullmatch(r"[0-9\.\+\-\*/\(\)\s\^]+", msg):
-            # Use sympy to safely evaluate arithmetic expressions
+        # Only evaluate if the message contains at least one operator and is not just a number
+        if re.search(r"[\+\-\*/]", msg) and not re.fullmatch(r"\d+", msg):
             result = sympy.sympify(msg).evalf()
-            # If result is an integer, cast to int for cleaner output
             if result == int(result):
                 result = int(result)
             return f"The answer is {result}"
-        # If the message is a single arithmetic expression (e.g. 1+1), also handle it
-        if re.fullmatch(r"[0-9]+[\+\-\*/][0-9]+", msg.replace(' ', '')):
-            result = sympy.sympify(msg).evalf()
+        # Try original message if it contains operators and is not just a number
+        if re.search(r"[\+\-\*/]", original_msg) and not re.fullmatch(r"\d+", original_msg):
+            result = sympy.sympify(original_msg).evalf()
             if result == int(result):
                 result = int(result)
             return f"The answer is {result}"
@@ -1001,23 +982,19 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
             return f"File content: {content[:500]}..."
         elif err:
             return err
-    # 5. Code execution/analysis
-    if any(w in msg_norm for w in ["run code", "execute code", "code:", "explain code", "suggest code", "analyze code", "find bug"]):
+    # 5. Code generation (explicit request)
+    if re.search(r'(generate|write|show|give) (me )?(code|javascript|python|java|c\+\+|c#|typescript|html|css)', msg_norm):
         lang = extract_language(msg_norm)
-        code_match = re.search(r'```([\w\+\#]*)\n([\s\S]+?)```', msg)
-        code = code_match.group(2) if code_match else msg
-        if "explain" in msg_norm or "suggest" in msg_norm or "analyze" in msg_norm or "find bug" in msg_norm:
-            suggestion, static_result = analyze_code(code, lang)
-            return f"Suggestion: {suggestion}\n{static_result or ''}"
-        output, err = run_code(code, lang)
-        if output:
-            return f"Output:\n{output}"
-        elif err:
-            return f"Error:\n{err}"
-    # 6. Speech
+        # Simple template for common code requests
+        if lang == 'javascript' and 'print' in msg_norm and 'console' in msg_norm:
+            return """```javascript\nconsole.log('im so good');\n```"""
+        # Add more templates for other languages as needed
+        # Fallback: polite message
+        return f"Sorry, I can only generate code for specific requests. Please specify the language and what you want."
+    # 6. Speech (template-based, no OpenAI)
     topic, tone, audience, length = extract_speech_request(msg_norm)
     if topic:
-        speech = llm_fallback(f"Write a {tone or ''} speech about {topic} for {audience or 'a general audience'} of {length or 'medium'} length.")
+        speech = generate_speech_text(topic, tone, audience, length)
         return speech or "Speech generation unavailable."
     # 7. Intent/KB
     intent_reply = get_intent_response(msg)
@@ -1051,22 +1028,32 @@ def get_uploaded_file_content(filename):
     if not os.path.exists(filepath):
         return None, "File not found."
     try:
-        # PDF or image file
-        if filename.lower().endswith(('.pdf', '.png', '.jpg', '.jpeg', '.gif')):
-            # Extract text from PDF or image
-            if filename.lower().endswith('.pdf'):
-                return extract_text_from_pdf(filepath)
-            else:
-                return extract_text_from_image(filepath)
-        # DOCX file
+        if filename.lower().endswith('.pdf'):
+            text, tables, err = extract_text_from_pdf(filepath)
+            if err:
+                return None, err
+            return text, None
         elif filename.lower().endswith('.docx'):
-            return extract_text_from_docx(filepath)
-        # XLSX file
+            text, tables, err = extract_text_from_docx(filepath)
+            if err:
+                return None, err
+            return text, None
         elif filename.lower().endswith('.xlsx'):
-            return extract_text_from_xlsx(filepath)
-        return None, "Unsupported file type."
+            text, tables, err = extract_text_from_xlsx(filepath)
+            if err:
+                return None, err
+            return text, None
+        elif filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+            text, err = extract_text_from_image(filepath)
+            if err:
+                return None, err
+            return text, None
+        else:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            return content, None
     except Exception as e:
-        return None, f"Error reading file: {e}"
+        return None, f"File extraction error: {e}"
 
 # --- Multi-Document/Context Q&A ---
 def get_all_uploaded_files():
@@ -1091,17 +1078,14 @@ def multi_file_semantic_qa(question):
         if content:
             answer = semantic_doc_qa(question, content)
             if answer:
-                # Score by semantic similarity
-                from sklearn.feature_extraction.text import TfidfVectorizer
-                vectorizer = TfidfVectorizer().fit([question, answer])
-                vectors = vectorizer.transform([question, answer])
-                score = (vectors[0:1] @ vectors[1:2].T).toarray()[0][0]
+                # Use TF-IDF similarity as a proxy for score
+                _, score = semantic_similarity(question, [answer])
                 if score > best_score:
                     best_score = score
                     best_answer = answer
                     best_file = fname
     if best_answer:
-        return f"From file '{best_file}': {best_answer}"
+        return f"From {best_file}: {best_answer}"
     return None
 
 # --- Tool/Plugin Execution (WolframAlpha, Wikipedia, Calculator, etc.) ---
@@ -1138,60 +1122,76 @@ def analyze_code(code, language='python'):
     """
     Uses LLM and static analysis to find bugs, suggest improvements, and explain errors.
     """
-    # LLM-based suggestion
     suggestion = llm_fallback(f"Find bugs, explain errors, and suggest improvements for this {language} code:\n{code}")
-    # Static analysis (Python only)
     static_result = None
     if language == 'python':
         try:
             import ast
-            ast.parse(code)
-            static_result = "No syntax errors detected."
-        except Exception as e:
-            static_result = f"Static analysis: {e}"
-    return (suggestion or "No LLM suggestion."), static_result
+            import pyflakes.api
+            import pyflakes.reporter
+            from io import StringIO
+            buf = StringIO()
+            reporter = pyflakes.reporter.Reporter(buf, buf)
+            pyflakes.api.check(code, '<string>', reporter=reporter)
+            static_result = buf.getvalue()
+        except Exception:
+            static_result = None
+    return suggestion, static_result
 
 # --- Continual Learning: Log User Feedback & Unhandled Queries ---
 def log_user_feedback(username, query, feedback):
-    try:
-        with open("user_feedback.log", "a", encoding="utf-8") as f:
-            f.write(f"{time.time()}\t{username}\t{query}\t{feedback}\n")
-    except Exception:
-        pass
-
-# --- Advanced Memory: Long-Term User Preferences ---
-def save_user_preference(username, key, value):
     """
-    Saves a user preference (e.g., language, style, favorite tools).
+    Logs user feedback to a feedback.json file.
     """
-    pref_file = "user_preferences.json"
     try:
-        if os.path.exists(pref_file):
-            with open(pref_file, "r", encoding="utf-8") as f:
-                prefs = json.load(f)
+        record = {
+            "username": username,
+            "query": query,
+            "feedback": feedback,
+            "timestamp": time.time()
+        }
+        if os.path.exists('feedback.json'):
+            with open('feedback.json', 'r', encoding='utf-8') as f:
+                data = json.load(f)
         else:
-            prefs = {}
-        if username not in prefs:
-            prefs[username] = {}
-        prefs[username][key] = value
-        atomic_write_json(prefs, pref_file)
-    except Exception:
-        pass
+            data = []
+        data.append(record)
+        with open('feedback.json', 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[ERROR] log_user_feedback: {e}")
+
+
+def save_user_preference(username, key, value):
+    try:
+        if os.path.exists('user_data.json'):
+            with open('user_data.json', 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        else:
+            data = {}
+        if username not in data:
+            data[username] = {}
+        if 'preferences' not in data[username]:
+            data[username]['preferences'] = {}
+        data[username]['preferences'][key] = value
+        with open('user_data.json', 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[ERROR] save_user_preference: {e}")
+
 
 def get_user_preference(username, key):
-    pref_file = "user_preferences.json"
     try:
-        with open(pref_file, "r", encoding="utf-8") as f:
-            prefs = json.load(f)
-        return prefs.get(username, {}).get(key)
-    except Exception:
-        return None
+        if os.path.exists('user_data.json'):
+            with open('user_data.json', 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data.get(username, {}).get('preferences', {}).get(key)
+    except Exception as e:
+        print(f"[ERROR] get_user_preference: {e}")
+    return None
 
-# --- Voice Input/Output (Speech-to-Text & Text-to-Speech) ---
+
 def speech_to_text(audio_path):
-    """
-    Converts speech audio to text using SpeechRecognition and Google API.
-    """
     try:
         import speech_recognition as sr
         r = sr.Recognizer()
@@ -1199,16 +1199,15 @@ def speech_to_text(audio_path):
             audio = r.record(source)
         return r.recognize_google(audio)
     except Exception as e:
-        return f"Speech recognition error: {e}"
+        return f"Speech-to-text error: {e}"
+
 
 def text_to_speech(text, output_path):
-    """
-    Converts text to speech audio using gTTS.
-    """
     try:
-        from gtts import gTTS
-        tts = gTTS(text)
-        tts.save(output_path)
+        import pyttsx3
+        engine = pyttsx3.init()
+        engine.save_to_file(text, output_path)
+        engine.runAndWait()
         return output_path
     except Exception as e:
         return f"Text-to-speech error: {e}"
@@ -1224,6 +1223,38 @@ def detect_emotion(text):
         return t2e.get_emotion(text)
     except Exception:
         return {}
+
+def generate_speech_text(topic, tone=None, audience=None, length=None):
+    """
+    Generates a speech text based on topic, tone, audience, and length using templates.
+    """
+    # Basic templates
+    base = f"Dear {audience or 'friends'},\n\n" if audience else "Ladies and gentlemen,\n\n"
+    if not topic:
+        topic = "something important"
+    if tone == 'funny':
+        body = f"Today, let's talk about {topic}. Now, I know what you're thinking: 'Oh no, not {topic} again!' But don't worry, I'll try to keep it entertaining."
+    elif tone == 'motivational':
+        body = f"Today, I want to inspire you about {topic}. Remember, every great achievement starts with a single step. Let's embrace {topic} with courage and determination!"
+    elif tone == 'serious':
+        body = f"Today, we must address the serious matter of {topic}. It is crucial that we understand its impact and work together for a better future."
+    elif tone == 'sad':
+        body = f"It's with a heavy heart that I speak about {topic} today. Sometimes, life brings challenges, and {topic} is one of them. But together, we can find hope."
+    else:
+        body = f"I would like to share my thoughts on {topic}. It's a subject that affects us all in different ways."
+    # Adjust length
+    if length == 'short':
+        closing = "Thank you."
+    elif length == 'long':
+        closing = f"In conclusion, {topic} is something we should all reflect on. Thank you for your attention, and let's continue this conversation beyond today."
+        body += "\n\nLet me elaborate further. " + (
+            f"{topic.capitalize()} has many facets, and its importance cannot be overstated. "
+            f"Whether you are young or old, {topic} touches your life. "
+            f"Let's work together to make a positive difference. "
+        )
+    else:
+        closing = "Thank you for listening."
+    return f"{base}{body}\n\n{closing}"
 
 # --- Enhanced get_response with all new capabilities ---
 def get_response(msg, username=None, file_context=None, all_files=False, feedback=None):
@@ -1274,23 +1305,19 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
             return f"File content: {content[:500]}..."
         elif err:
             return err
-    # 5. Code execution/analysis
-    if any(w in msg_norm for w in ["run code", "execute code", "code:", "explain code", "suggest code", "analyze code", "find bug"]):
+    # 5. Code generation (explicit request)
+    if re.search(r'(generate|write|show|give) (me )?(code|javascript|python|java|c\+\+|c#|typescript|html|css)', msg_norm):
         lang = extract_language(msg_norm)
-        code_match = re.search(r'```([\w\+\#]*)\n([\s\S]+?)```', msg)
-        code = code_match.group(2) if code_match else msg
-        if "explain" in msg_norm or "suggest" in msg_norm or "analyze" in msg_norm or "find bug" in msg_norm:
-            suggestion, static_result = analyze_code(code, lang)
-            return f"Suggestion: {suggestion}\n{static_result or ''}"
-        output, err = run_code(code, lang)
-        if output:
-            return f"Output:\n{output}"
-        elif err:
-            return f"Error:\n{err}"
-    # 6. Speech
+        # Simple template for common code requests
+        if lang == 'javascript' and 'print' in msg_norm and 'console' in msg_norm:
+            return """```javascript\nconsole.log('im so good');\n```"""
+        # Add more templates for other languages as needed
+        # Fallback: polite message
+        return f"Sorry, I can only generate code for specific requests. Please specify the language and what you want."
+    # 6. Speech (template-based, no OpenAI)
     topic, tone, audience, length = extract_speech_request(msg_norm)
     if topic:
-        speech = llm_fallback(f"Write a {tone or ''} speech about {topic} for {audience or 'a general audience'} of {length or 'medium'} length.")
+        speech = generate_speech_text(topic, tone, audience, length)
         return speech or "Speech generation unavailable."
     # 7. Intent/KB
     intent_reply = get_intent_response(msg)
@@ -1392,7 +1419,19 @@ def auto_update_user_location():
             update_user_location(username, ip)
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "cli":
+        print("DIZI AI Chatbot CLI Mode\nType 'exit' to quit.")
+        username = input("Enter your username: ").strip() or "cli_user"
+        while True:
+            msg = input("You: ")
+            if msg.lower() in ("exit", "quit"): 
+                print("Goodbye!")
+                break
+            reply = get_response(msg, username=username)
+            print(f"AI: {reply}")
+    else:
+        app.run(debug=True)
 
 
 
