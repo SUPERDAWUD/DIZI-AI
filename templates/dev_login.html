@@ -2,18 +2,28 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Dev Mode Login</title>
+    <title>Developer Login</title>
     <link rel="stylesheet" href="/static/style.css">
+    <style>
+        body { background: #181a1b; color: #eee; font-family: Arial, sans-serif; }
+        .container { max-width: 400px; margin: 80px auto; background: #222; padding: 32px; border-radius: 12px; box-shadow: 0 2px 16px #0006; }
+        h1 { color: #7fd957; text-align: center; }
+        label { display: block; margin-bottom: 8px; font-weight: bold; }
+        input[type="password"] { width: 100%; padding: 8px; margin-bottom: 16px; border-radius: 6px; border: 1px solid #444; background: #181a1b; color: #eee; }
+        button { background: #7fd957; color: #222; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer; font-weight: bold; width: 100%; }
+        button:hover { background: #6fc947; }
+        .error { color: #ff6b6b; margin-bottom: 16px; text-align: center; }
+    </style>
 </head>
 <body>
-    <div class="dev-login-container">
-        <h2>Developer Mode Login</h2>
+    <div class="container">
+        <h1>Developer Login</h1>
         {% if error %}<div class="error">{{ error }}</div>{% endif %}
         <form method="post">
-            <input type="password" name="password" placeholder="Enter Dev Mode Password" required>
+            <label for="password">Password:</label>
+            <input type="password" name="password" id="password" required>
             <button type="submit">Login</button>
         </form>
-        <a href="/">Back to Chat</a>
     </div>
 </body>
 </html>

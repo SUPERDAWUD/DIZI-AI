@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Coding Assistant</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        body { background: #181a1b; color: #eee; font-family: 'Segoe UI', 'Fira Mono', 'Consolas', monospace; }
+        .vscode-container { display: flex; height: 95vh; }
+        .sidebar { width: 220px; background: #23272e; color: #fff; padding: 1em; border-right: 2px solid #222; }
+        .main { flex: 1; display: flex; flex-direction: column; }
+        .editor { flex: 1; background: #1e1e1e; border-bottom: 2px solid #222; }
+        .console { height: 160px; background: #181a1b; color: #7fd957; padding: 1em; font-family: 'Fira Mono', monospace; overflow-y: auto; }
+        .chatbot { height: 220px; background: #222; color: #eee; padding: 1em; border-top: 2px solid #222; overflow-y: auto; }
+        .chat-input { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #444; background: #181a1b; color: #eee; margin-top: 8px; }
+        .chat-send { background: #7fd957; color: #222; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-weight: bold; margin-top: 8px; }
+        .chat-send:hover { background: #6fc947; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs/loader.js"></script>
+</head>
+<body>
+    <div class="vscode-container">
+        <div class="sidebar">
+            <h2 style="color:#7fd957;">Files</h2>
+            <ul id="file-list" style="list-style:none;padding:0;"></ul>
+        </div>
+        <div class="main">
+            <div class="editor" id="editor"></div>
+            <div class="console" id="console">Console output will appear here.</div>
+            <div class="chatbot" id="chatbot">
+                <div id="chat-messages"></div>
+                <input class="chat-input" id="chat-input" placeholder="Ask the coding assistant...">
+                <button class="chat-send" onclick="sendChat()">Send</button>
+            </div>
+        </div>
+    </div>
+    <script>
+    // Monaco Editor setup
+    require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs' }});
+    require(['vs/editor/editor.main'], function() {
+        window.editor = monaco.editor.create(document.getElementById('editor'), {
+            value: '// Start coding here...\n',
+            language: 'python',
+            theme: 'vs-dark',
+            automaticLayout: true
+        });
+    });
+    // Dummy file list
+    const files = ['main.py', 'utils.py', 'README.md'];
+    const fileList = document.getElementById('file-list');
+    files.forEach(f => {
+        const li = document.createElement('li');
+        li.textContent = f;
+        li.style.cursor = 'pointer';
+        li.onclick = () => {
+            window.editor.setValue('// Opened ' + f + '\n');
+        };
+        fileList.appendChild(li);
+    });
+    // Chatbot logic (real backend)
+    async function sendChat() {
+        const input = document.getElementById('chat-input');
+        const msg = input.value.trim();
+        if (!msg) return;
+        const chatMessages = document.getElementById('chat-messages');
+        const userMsg = document.createElement('div');
+        userMsg.textContent = 'You: ' + msg;
+        chatMessages.appendChild(userMsg);
+        // Get code from editor
+        const code = window.editor.getValue();
+        const language = 'python'; // You can add language selection later
+        // Send to backend
+        const res = await fetch('/api/code-assistant-chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: msg, code: code, language: language })
+        });
+        const data = await res.json();
+        // Show AI reply
+        const botMsg = document.createElement('div');
+        botMsg.textContent = 'Copilot: ' + data.reply;
+        chatMessages.appendChild(botMsg);
+        // Show code output in console
+        document.getElementById('console').textContent = data.output || 'Console output will appear here.';
+        input.value = '';
+    }
+    </script>
+</body>
+</html>

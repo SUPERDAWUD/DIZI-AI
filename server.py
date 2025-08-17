@@ -5,6 +5,9 @@ from chat import get_response
 from utils import start_generator_api
 from functools import wraps
 import json
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 
@@ -14,6 +17,7 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 DEV_MODE_PASSWORD = os.getenv('DEV_MODE_PASSWORD', 'supersecret')
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'devsecret')
 
 # Dev Mode decorator
 
@@ -91,6 +95,108 @@ def api_chats():
         return jsonify(chats)
     except Exception as e:
         return jsonify([])
+
+# --- Gemini Models Page ---
+@app.route('/dev/gemini_models')
+@dev_mode_required
+def dev_gemini_models():
+    gemini_key = os.getenv('GEMINI_API_KEY')
+    if not gemini_key:
+        return render_template('gemini_models.html', error='GEMINI_API_KEY not set in environment.', models=[])
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=gemini_key)
+        models = genai.list_models()
+        model_list = []
+        for m in models:
+            model_list.append({
+                'name': getattr(m, 'name', str(m)),
+                'supported_generation_methods': getattr(m, 'supported_generation_methods', [])
+            })
+        return render_template('gemini_models.html', models=model_list)
+    except Exception as e:
+        return render_template('gemini_models.html', error=str(e), models=[])
+
+# --- Windows-compatible Math Handler ---
+import concurrent.futures
+
+def handle_math(msg):
+    import sympy, re
+    from sympy import symbols, Eq, solve, simplify, expand, factor, diff, integrate
+    x, y = symbols("x y")
+    original_msg = msg.strip()
+    msg = original_msg.lower().replace("^", "**")
+    math_prefixes = [
+        "what is ", "whats ", "what's ", "calculate ", "solve ", "compute ", "evaluate ", "find ", "give me ", "tell me ", "can you solve ", "can you calculate ", "can you evaluate ", "can you compute "
+    ]
+    for prefix in math_prefixes:
+        if msg.startswith(prefix):
+            msg = msg[len(prefix):].strip()
+            break
+    def math_eval(expr):
+        try:
+            if re.search(r"[\+\-\*/]", expr) and not re.fullmatch(r"\d+", expr):
+                result = sympy.sympify(expr).evalf()
+                if result == int(result):
+                    result = int(result)
+                return f"The answer is {result}"
+            return None
+        except Exception as e:
+            return f"Math error: {e}"
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(math_eval, msg)
+        try:
+            return future.result(timeout=2)
+        except concurrent.futures.TimeoutError:
+            return "Math error: Calculation took too long. Please try a simpler question."
+
+# --- API: List repo files ---
+@app.route('/api/code-assistant-files')
+@dev_mode_required
+def code_assistant_files():
+    repo_dir = os.getcwd()
+    files = []
+    for root, dirs, filenames in os.walk(repo_dir):
+        for fname in filenames:
+            # Only show code/text files
+            if fname.endswith(('.py', '.js', '.ts', '.html', '.css', '.md', '.json', '.txt')):
+                files.append(os.path.relpath(os.path.join(root, fname), repo_dir))
+    return jsonify({'files': files})
+
+# --- API: Read file ---
+@app.route('/api/code-assistant-read', methods=['POST'])
+@dev_mode_required
+def code_assistant_read():
+    data = request.get_json()
+    path = data.get('path')
+    repo_dir = os.getcwd()
+    abs_path = os.path.abspath(os.path.join(repo_dir, path))
+    if not abs_path.startswith(repo_dir):
+        return jsonify({'error': 'Invalid path.'})
+    try:
+        with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        return jsonify({'content': content})
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+# --- API: Write file ---
+@app.route('/api/code-assistant-write', methods=['POST'])
+@dev_mode_required
+def code_assistant_write():
+    data = request.get_json()
+    path = data.get('path')
+    content = data.get('content', '')
+    repo_dir = os.getcwd()
+    abs_path = os.path.abspath(os.path.join(repo_dir, path))
+    if not abs_path.startswith(repo_dir):
+        return jsonify({'error': 'Invalid path.'})
+    try:
+        with open(abs_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)})
 
 if __name__ == "__main__":
     start_generator_api()

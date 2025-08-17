@@ -5,61 +5,124 @@
     <title>Developer Panel</title>
     <link rel="stylesheet" href="/static/style.css">
     <style>
-        .dev-panel-section { margin-bottom: 2em; }
-        textarea { width: 100%; min-height: 100px; }
-        .output-box { background: #222; color: #0f0; padding: 1em; border-radius: 5px; margin-top: 1em; }
+        body { background: #181a1b; color: #eee; font-family: Arial, sans-serif; }
+        .container { max-width: 800px; margin: 40px auto; background: #222; padding: 32px; border-radius: 12px; box-shadow: 0 2px 16px #0006; }
+        h1 { color: #7fd957; }
+        .section { margin-bottom: 32px; }
+        label { display: block; margin-bottom: 8px; font-weight: bold; }
+        input, textarea, select { width: 100%; padding: 8px; margin-bottom: 16px; border-radius: 6px; border: 1px solid #444; background: #181a1b; color: #eee; }
+        button { background: #7fd957; color: #222; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #6fc947; }
     </style>
 </head>
 <body>
-    <div class="dev-panel-container">
-        <h2>Developer Mode Panel</h2>
-        <a href="/">Back to Chat</a>
-        <div class="dev-panel-section">
-            <h3>Run Arbitrary Code</h3>
-            <form id="dev-exec-form">
-                <label>Language:
-                    <select name="language">
-                        <option value="python">Python</option>
-                    </select>
-                </label><br>
-                <textarea name="code" placeholder="Enter code to execute..."></textarea><br>
-                <button type="submit">Run Code</button>
-            </form>
-            <div id="dev-exec-output" class="output-box" style="display:none;"></div>
+    <div class="container">
+        <h1>Developer Panel</h1>
+        <div class="section">
+            <h2>Welcome to the Developer Panel!</h2>
+            <p>If you see this page, you are logged in as a developer. All dev tools are available below.</p>
         </div>
-        <div class="dev-panel-section">
-            <h3>Self-Modify Code</h3>
-            <form id="self-modify-form">
-                <input type="text" name="target_file" placeholder="Target file (e.g. chat.py)" required><br>
-                <textarea name="new_code" placeholder="Paste new code here..."></textarea><br>
-                <button type="submit">Overwrite File</button>
+        <div class="section">
+            <h2>Gemini Model Info</h2>
+            <form action="/dev/gemini_models" method="get">
+                <button type="submit">List Gemini Models</button>
             </form>
-            <div id="self-modify-output" class="output-box" style="display:none;"></div>
+        </div>
+        <div class="section">
+            <h2>Run Code</h2>
+            <form action="/dev/exec" method="post">
+                <label for="code">Code:</label>
+                <textarea name="code" id="code" rows="6"></textarea>
+                <label for="language">Language:</label>
+                <select name="language" id="language">
+                    <option value="python">Python</option>
+                    <option value="javascript">JavaScript</option>
+                    <option value="bash">Bash</option>
+                    <option value="java">Java</option>
+                    <option value="c++">C++</option>
+                </select>
+                <button type="submit">Run</button>
+            </form>
+        </div>
+        <div class="section">
+            <h2>Self-Modify Code</h2>
+            <form action="/dev/self-modify" method="post">
+                <label for="new_code">New Code:</label>
+                <textarea name="new_code" id="new_code" rows="6"></textarea>
+                <label for="target_file">Target File:</label>
+                <input type="text" name="target_file" id="target_file" placeholder="e.g. chat.py">
+                <button type="submit">Modify</button>
+            </form>
+        </div>
+        <div class="section">
+            <h2>User Personality (Pie Chart)</h2>
+            <canvas id="personalityChart" width="400" height="400"></canvas>
+        </div>
+        <div class="section">
+            <h2>Questions Asked by Users</h2>
+            <table style="width:100%;background:#222;color:#eee;border-radius:8px;">
+                <thead>
+                    <tr style="background:#333;color:#7fd957;"><th>User</th><th>Question</th></tr>
+                </thead>
+                <tbody id="questionsTableBody"></tbody>
+            </table>
+        </div>
+        <div class="section">
+            <a href="/dev/code_assistant"><button style="background:#222;color:#7fd957;padding:0.7em 1.5em;border-radius:8px;font-size:1.1em;">Coding Assistant</button></a>
         </div>
     </div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
-    // Dev exec form
-    document.getElementById('dev-exec-form').onsubmit = async function(e) {
-        e.preventDefault();
-        const form = e.target;
-        const data = new FormData(form);
-        const res = await fetch('/dev/exec', { method: 'POST', body: data });
-        const out = await res.json();
-        const box = document.getElementById('dev-exec-output');
-        box.style.display = 'block';
-        box.textContent = out.output || out.error || 'No output.';
-    };
-    // Self-modify form
-    document.getElementById('self-modify-form').onsubmit = async function(e) {
-        e.preventDefault();
-        const form = e.target;
-        const data = new FormData(form);
-        const res = await fetch('/dev/self-modify', { method: 'POST', body: data });
-        const out = await res.json();
-        const box = document.getElementById('self-modify-output');
-        box.style.display = 'block';
-        box.textContent = out.success ? 'File overwritten successfully.' : (out.error || 'Failed.');
-    };
+// --- Personality Pie Chart ---
+const userData = {
+  Dawud: {
+    personality: {
+      formality: "low",
+      humor: "high",
+      directness: "low",
+      preferred_tone: "humorous",
+      emoji_usage: "high",
+      greeting_style: "high"
+    }
+  }
+};
+const traitLabels = Object.keys(userData.Dawud.personality);
+const traitValues = traitLabels.map(l => {
+  const v = userData.Dawud.personality[l];
+  if (v === "high") return 3;
+  if (v === "humorous") return 2;
+  if (v === "low") return 1;
+  return 2;
+});
+const traitColors = ["#7fd957", "#ff6b6b", "#6fc947", "#f7c948", "#57d9c7", "#d957a3"];
+new Chart(document.getElementById('personalityChart'), {
+  type: 'pie',
+  data: {
+    labels: traitLabels,
+    datasets: [{
+      data: traitValues,
+      backgroundColor: traitColors
+    }]
+  },
+  options: {
+    plugins: { legend: { labels: { color: '#eee' } } }
+  }
+});
+// --- Questions Table ---
+const userQuestions = {
+  Dawud: [
+    "hello", "quit", "write me a speech about lions", "hello", "quit", "hello", "who is elon musk", "can you generate code in python to print hello world", "Thanks", "hello", "whats 2+3", "no whats 2+3", "generate me a picture of a jungle", "whats 1+1", "1+1", "1+1", "1+1", "7+8", "8*9", "whats 2*2", "2+2", "generate me an image of a zoo", "create image of a zoo", "write me a python program that allows me to make a list", "can you write me the code", "write me code that prints hello to the console in Java script", "hello", "who is donald trump", "777097908*9999999", "890809/3", "cos(7)", "bye", "quit", "Bye", "See you later", "hello", "hi", "Hello", "hello", "Hello", "yo", "Yo", "quiy", "Yo", "hello", "can you tell me about trumps deployment of troops in LA", "what about marines", "tell me how many marines he deployed in LA", "how many marines deployed in la", "elon musk", "Hi", " many marines did trump deploy in la", "marines", "what are marines", "marines", "hfaoshuohfds", "sfaaaaasfaaaaaaaa", "quit", "who is elon musk", "elon musk", "Who is donald j trump", "who is elon musk", "in javascript how do i print to the console", "ok whats the weather in virgina right now", "what time is it", "what time is it in VA", "time in VA", "who made you", "who created you", "Who created you", "whats your name", "ok cool", "YO", "what time is magrib", "whats the weather in springfield va", "weather in va", "BYE", "whats the time", "What time is it", "Make a speech about black holes", "jfiolshdfosd", "whats 2+2"
+  ],
+  Zayd: ["whats 1+1", "whos elon musk", "write me a speech about lions"]
+};
+const tbody = document.getElementById('questionsTableBody');
+Object.entries(userQuestions).forEach(([user, questions]) => {
+  questions.forEach(q => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${user}</td><td>${q}</td>`;
+    tbody.appendChild(tr);
+  });
+});
     </script>
 </body>
 </html>

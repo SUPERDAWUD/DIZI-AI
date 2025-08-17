@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Gemini Models</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        body { background: #181a1b; color: #eee; font-family: Arial, sans-serif; }
+        .container { max-width: 700px; margin: 40px auto; background: #222; padding: 32px; border-radius: 12px; box-shadow: 0 2px 16px #0006; }
+        h1 { color: #7fd957; }
+        table { width: 100%; border-collapse: collapse; margin-top: 24px; }
+        th, td { padding: 12px; border-bottom: 1px solid #444; }
+        th { background: #333; color: #7fd957; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Gemini Models</h1>
+        {% if error %}
+            <div style="color:#ff6b6b;">{{ error }}</div>
+        {% else %}
+        <table>
+            <thead>
+                <tr><th>Model Name</th><th>Supported Methods</th></tr>
+            </thead>
+            <tbody>
+                {% for model in models %}
+                <tr>
+                    <td>{{ model.name }}</td>
+                    <td>{{ model.supported_generation_methods | join(', ') }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </div>
+</body>
+</html>

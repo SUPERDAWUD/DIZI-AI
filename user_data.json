@@ -1,3 +1,12 @@
-[
-  "Dawud"
-]
+{
+  "Dawud": {
+    "personality": {
+      "formality": "high",
+      "humor": "low",
+      "directness": "high",
+      "preferred_tone": "humorous",
+      "emoji_usage": "high",
+      "greeting_style": "low"
+    }
+  }
+}

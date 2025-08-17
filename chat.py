@@ -22,6 +22,9 @@ import tempfile
 import shutil
 from flask import Flask, request, jsonify, render_template, redirect, url_for, session
 from functools import wraps
+import sys
+import wikipedia
+import google.generativeai as genai
 
 # --- Flask App Initialization (ensure only one app instance) ---
 if 'app' not in globals():
@@ -657,6 +660,14 @@ def run_code(code, language='python'):
     return None, f"Language '{language}' not supported for execution."
 
 # Math handler (basic & symbolic)
+import signal
+
+class TimeoutException(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutException()
+
 def handle_math(msg):
     x, y = symbols("x y")
     original_msg = msg.strip()
@@ -670,15 +681,19 @@ def handle_math(msg):
             msg = msg[len(prefix):].strip()
             break
     try:
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(2)  # 2 second timeout
         # Only evaluate if the message contains at least one operator and is not just a number
         if re.search(r"[\+\-\*/]", msg) and not re.fullmatch(r"\d+", msg):
             result = sympy.sympify(msg).evalf()
+            signal.alarm(0)
             if result == int(result):
                 result = int(result)
             return f"The answer is {result}"
         # Try original message if it contains operators and is not just a number
         if re.search(r"[\+\-\*/]", original_msg) and not re.fullmatch(r"\d+", original_msg):
             result = sympy.sympify(original_msg).evalf()
+            signal.alarm(0)
             if result == int(result):
                 result = int(result)
             return f"The answer is {result}"
@@ -689,18 +704,28 @@ def handle_math(msg):
                 sol = solve(Eq(sympy.sympify(lhs), sympy.sympify(rhs)))
             else:
                 sol = solve(sympy.sympify(expr))
+            signal.alarm(0)
             return f"Solution: {sol}"
         if msg.startswith("simplify"):
+            signal.alarm(0)
             return f"Simplified: {simplify(msg.replace('simplify', '').strip())}"
         if msg.startswith("expand"):
+            signal.alarm(0)
             return f"Expanded: {expand(msg.replace('expand', '').strip())}"
         if msg.startswith("factor"):
+            signal.alarm(0)
             return f"Factored: {factor(msg.replace('factor', '').strip())}"
         if msg.startswith("differentiate"):
+            signal.alarm(0)
             return f"Derivative: {diff(msg.replace('differentiate', '').strip())}"
         if msg.startswith("integrate"):
+            signal.alarm(0)
             return f"Integral: {integrate(msg.replace('integrate', '').strip())}"
+        signal.alarm(0)
+    except TimeoutException:
+        return "Math error: Calculation took too long. Please try a simpler question."
     except Exception as e:
+        signal.alarm(0)
         return f"Math error: {e}"
     return None
 
@@ -933,92 +958,465 @@ def explain_code(code, language='python'):
     explanation = llm_fallback(f"Explain this {language} code and suggest improvements:\n{code}")
     return explanation or "Code explanation unavailable."
 
-# --- Enhanced get_response with smarter routing ---
+# --- Free LLM Integration: Gemini/HuggingFace for Code & Speech Generation ---
+# --- Gemini Model Selection ---
+GEMINI_MODELS = {
+    'text': 'models/gemini-2.5-pro',  # Best for advanced text/chat
+    'code': 'models/gemini-2.5-pro',  # Best for code generation
+    'speech': 'models/gemini-2.5-pro',  # Speech/text generation
+    'embedding': 'models/gemini-embedding-001',  # Embedding tasks
+    'image': 'models/imagen-4.0-ultra-generate-001',  # Best for image generation
+    'video': 'models/veo-3.0-generate-preview',  # Best for video generation
+    'audio': 'models/gemini-2.5-flash-preview-native-audio-dialog',  # Audio/dialogue
+}
+
+def free_llm_generate(prompt, task='text', language='en'):
+    """
+    Uses free LLM APIs (Google Gemini, HuggingFace) for text/code/speech/image/video/audio generation.
+    Returns the generated text or a clear error message.
+    """
+    gemini_key = os.getenv('GEMINI_API_KEY')
+    if gemini_key:
+        try:
+            genai.configure(api_key=gemini_key)
+            model_name = GEMINI_MODELS.get(task, GEMINI_MODELS['text'])
+            model = genai.GenerativeModel(model_name)
+            if task == 'image':
+                response = model.generate_content(prompt)
+            elif task == 'video':
+                response = model.generate_content(prompt)
+            elif task == 'audio':
+                response = model.generate_content(prompt)
+            elif task == 'embedding':
+                response = model.embed_content(prompt)
+            else:
+                response = model.generate_content(prompt)
+            # Handle different response types
+            if hasattr(response, 'text'):
+                return response.text.strip()
+            elif hasattr(response, 'result'):
+                return str(response.result)
+            elif isinstance(response, dict):
+                return str(response)
+            else:
+                return str(response)
+        except Exception as e:
+            return f"Gemini API error: {e}"
+    hf_token = os.getenv('HF_API_TOKEN')
+    if hf_token:
+        try:
+            start_time = time.time()
+            headers = {"Authorization": f"Bearer {hf_token}"}
+            payload = {"inputs": prompt}
+            # Use code generation model for code, text model for speech
+            if task == 'code':
+                url = "https://api-inference.huggingface.co/models/bigcode/starcoder2-15b"
+            else:
+                url = "https://api-inference.huggingface.co/models/google/gemma-7b"
+            resp = requests.post(url, headers=headers, json=payload, timeout=10)
+            elapsed = time.time() - start_time
+            if elapsed > 15:
+                return f"HuggingFace API error: Response took too long ({elapsed:.1f}s). Please try again later."
+            if resp.ok:
+                result = resp.json()
+                if isinstance(result, list) and 'generated_text' in result[0]:
+                    return result[0]['generated_text'].strip()
+                elif isinstance(result, dict) and 'generated_text' in result:
+                    return result['generated_text'].strip()
+                elif isinstance(result, list) and 'text' in result[0]:
+                    return result[0]['text'].strip()
+            return f"HuggingFace API error: {resp.text}"
+        except Exception as e:
+            return f"HuggingFace API error: {e}"
+    return "No valid Gemini or HuggingFace API key found. Generation unavailable."
+
+# Update all generation functions to use the correct task
+
+def generate_code_text(prompt, language='en'):
+    return free_llm_generate(prompt, task='code', language=language)
+
+def generate_speech_text(topic, tone, audience, length):
+    prompt = f"Write a {length} speech about {topic} for {audience} in a {tone} tone."
+    return free_llm_generate(prompt, task='speech')
+
+def generate_image_text(prompt):
+    return free_llm_generate(prompt, task='image')
+
+def generate_video_text(prompt):
+    return free_llm_generate(prompt, task='video')
+
+def generate_audio_text(prompt):
+    return free_llm_generate(prompt, task='audio')
+
+def generate_embedding_text(prompt):
+    return free_llm_generate(prompt, task='embedding')
+
+# --- Personality Adaptation ---
+def analyze_user_personality(username, msg):
+    """
+    Analyzes the user's message and recent history to infer personality traits (formality, humor, directness, tone).
+    Updates user_data.json with detected traits.
+    """
+    traits = {
+        'formality': None,
+        'humor': None,
+        'directness': None,
+        'preferred_tone': None,
+        'emoji_usage': None,
+        'greeting_style': None
+    }
+    # Analyze current message
+    msg_lc = msg.lower()
+    if any(w in msg_lc for w in ['hi', 'hello', 'hey', 'greetings']):
+        traits['greeting_style'] = 'casual'
+    if any(e in msg for e in [':)', ':D', '😂', '😅', '😉', '😎', '🤣']):
+        traits['humor'] = 'high'
+        traits['emoji_usage'] = 'high'
+    if any(w in msg_lc for w in ['please', 'could you', 'would you', 'kindly']):
+        traits['formality'] = 'formal'
+    if any(w in msg_lc for w in ['now', 'quick', 'fast', 'urgent']):
+        traits['directness'] = 'direct'
+    if any(w in msg_lc for w in ['funny', 'joke', 'laugh']):
+        traits['preferred_tone'] = 'humorous'
+    if any(w in msg_lc for w in ['serious', 'professional', 'business']):
+        traits['preferred_tone'] = 'serious'
+    # Analyze recent history
+    recent = get_recent_conversation(username, n=10)
+    humor_count = sum(1 for r in recent if any(e in r['user_msg'] for e in ['😂', '😅', '😉', '😎', '🤣']))
+    formal_count = sum(1 for r in recent if any(w in r['user_msg'].lower() for w in ['please', 'kindly', 'would you']))
+    if humor_count > 2:
+        traits['humor'] = 'high'
+    if formal_count > 2:
+        traits['formality'] = 'formal'
+    # Save traits to user_data.json
+    try:
+        with user_data_lock:
+            if os.path.exists(USER_DATA_FILE):
+                with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            else:
+                data = {}
+            if username not in data:
+                data[username] = {}
+            data[username]['personality'] = traits
+            atomic_write_json(data, USER_DATA_FILE)
+    except Exception as e:
+        print(f"[ERROR] analyze_user_personality: {e}")
+    return traits
+
+def get_user_personality(username):
+    """
+    Loads personality traits for a user from user_data.json.
+    """
+    try:
+        with user_data_lock:
+            if os.path.exists(USER_DATA_FILE):
+                with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                return data.get(username, {}).get('personality', {})
+    except Exception as e:
+        print(f"[ERROR] get_user_personality: {e}")
+    return {}
+
+# --- Deep Learning Personality Trait Inference ---
+import torch.nn as nn
+import torch.nn.functional as F
+
+class PersonalityNet(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = torch.sigmoid(self.fc2(x))
+        return x
+
+# Define trait names and model
+PERSONALITY_TRAITS = ['formality', 'humor', 'directness', 'preferred_tone', 'emoji_usage', 'greeting_style']
+PERSONALITY_TONE_MAP = ['neutral', 'humorous', 'serious']
+PERSONALITY_INPUT_DIM = 6  # e.g., counts of keywords, emojis, etc.
+PERSONALITY_HIDDEN_DIM = 16
+PERSONALITY_OUTPUT_DIM = len(PERSONALITY_TRAITS)
+personality_model = PersonalityNet(PERSONALITY_INPUT_DIM, PERSONALITY_HIDDEN_DIM, PERSONALITY_OUTPUT_DIM)
+personality_model.eval()
+
+# Helper: Extract features from user history
+def extract_personality_features(history):
+    features = [0]*PERSONALITY_INPUT_DIM
+    for r in history:
+        msg = r['user_msg'].lower()
+        # Feature 0: formality
+        if any(w in msg for w in ['please', 'kindly', 'would you']):
+            features[0] += 1
+        # Feature 1: humor
+        if any(e in r['user_msg'] for e in ['😂', '😅', '😉', '😎', '🤣']):
+            features[1] += 1
+        # Feature 2: directness
+        if any(w in msg for w in ['now', 'quick', 'fast', 'urgent']):
+            features[2] += 1
+        # Feature 3: preferred_tone
+        if any(w in msg for w in ['funny', 'joke', 'laugh']):
+            features[3] += 1
+        if any(w in msg for w in ['serious', 'professional', 'business']):
+            features[4] += 1
+        # Feature 4: emoji usage
+        if any(e in r['user_msg'] for e in [':)', ':D', '😂', '😅', '😉', '😎', '🤣']):
+            features[5] += 1
+    return torch.tensor(features, dtype=torch.float32)
+
+# --- Enhanced Personality Analysis (Deep Learning) ---
+def analyze_user_personality(username, msg):
+    """
+    Uses a neural network to infer personality traits from user history and current message.
+    Updates user_data.json with detected traits.
+    """
+    recent = get_recent_conversation(username, n=10)
+    features = extract_personality_features(recent + [{'user_msg': msg}])
+    with torch.no_grad():
+        output = personality_model(features)
+    traits = {}
+    for i, trait in enumerate(PERSONALITY_TRAITS):
+        val = output[i].item()
+        if trait == 'preferred_tone':
+            if val < 0.33:
+                traits[trait] = 'neutral'
+            elif val < 0.66:
+                traits[trait] = 'humorous'
+            else:
+                traits[trait] = 'serious'
+        else:
+            traits[trait] = 'high' if val > 0.5 else 'low'
+    # Save traits to user_data.json
+    try:
+        with user_data_lock:
+            if os.path.exists(USER_DATA_FILE):
+                with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    data = {}
+            else:
+                data = {}
+            if username not in data or not isinstance(data[username], dict):
+                data[username] = {}
+            data[username]['personality'] = traits
+            atomic_write_json(data, USER_DATA_FILE)
+    except Exception as e:
+        print(f"[ERROR] analyze_user_personality: {e}")
+    return traits
+
+# --- Enhanced get_response: synthesize from all sources and adapt personality ---
 def get_response(msg, username=None, file_context=None, all_files=False, feedback=None):
-    msg_norm = normalize_grammar(msg)
+    # Apply spelling correction and grammar normalization
+    msg_corrected = correct_sentence(msg)
+    msg_norm = normalize_grammar(msg_corrected)
+    sources = []
+    # --- Personality adaptation ---
+    personality = analyze_user_personality(username, msg) if username else {}
     # 0. Tool/plugin execution
     tool_result = call_tool_plugin(msg_norm)
     if tool_result:
-        return tool_result
+        sources.append(('tool', tool_result))
     # 0.5. Location Q&A
     if any(q in msg_norm for q in ["where am i", "what's my location", "where are we", "my location", "where is my location"]):
         if username:
             loc = get_user_location_from_file(username)
             if loc:
-                return f"Your location: {loc.get('city', 'Unknown')}, {loc.get('region', '')}, {loc.get('country', '')} (lat: {loc.get('lat', '?')}, lon: {loc.get('lon', '?')})"
+                sources.append(('location', f"Your location: {loc.get('city', 'Unknown')}, {loc.get('region', '')}, {loc.get('country', '')} (lat: {loc.get('lat', '?')}, lon: {loc.get('lon', '?')})"))
             else:
-                return "Sorry, I couldn't determine your location."
+                sources.append(('location', "Sorry, I couldn't determine your location."))
         else:
-            return "I need your username to look up your location."
+            sources.append(('location', "I need your username to look up your location."))
     # 0.6. Local time Q&A
     if any(q in msg_norm for q in ["what time is it", "what's the time", "local time", "current time", "my time", "what time is it here"]):
         if username:
             loc = get_user_location_from_file(username)
             if loc:
-                return get_local_time(loc)
+                sources.append(('time', get_local_time(loc)))
             else:
-                return "Sorry, I couldn't determine your location to get the time."
+                sources.append(('time', "Sorry, I couldn't determine your location to get the time."))
         else:
-            return "I need your username to look up your local time."
+            sources.append(('time', "I need your username to look up your local time."))
     # 1. Math
     math_reply = handle_math(msg_norm)
     if math_reply:
-        return math_reply
+        sources.append(('math', math_reply))
     # 2. Image generation
     if any(w in msg_norm for w in ["draw", "generate image", "create image", "picture", "art"]):
-        return generate_image_from_prompt(msg)
+        sources.append(('image', generate_image_from_prompt(msg)))
     # 3. Multi-file Q&A
     if all_files:
         answer = multi_file_semantic_qa(msg)
         if answer:
-            return answer
+            sources.append(('files', answer))
     # 4. File Q&A (if file_context provided)
     if file_context:
         content, err = get_uploaded_file_content(file_context)
         if content:
             answer = semantic_doc_qa(msg, content)
             if answer:
-                return f"From your file: {answer}"
-            return f"File content: {content[:500]}..."
+                sources.append(('file', f"From your file: {answer}"))
+            else:
+                sources.append(('file', f"File content: {content[:500]}..."))
         elif err:
-            return err
+            sources.append(('file', err))
     # 5. Code generation (explicit request)
     if re.search(r'(generate|write|show|give) (me )?(code|javascript|python|java|c\+\+|c#|typescript|html|css)', msg_norm):
         lang = extract_language(msg_norm)
-        # Simple template for common code requests
-        if lang == 'javascript' and 'print' in msg_norm and 'console' in msg_norm:
-            return """```javascript\nconsole.log('im so good');\n```"""
-        # Add more templates for other languages as needed
-        # Fallback: polite message
-        return f"Sorry, I can only generate code for specific requests. Please specify the language and what you want."
-    # 6. Speech (template-based, no OpenAI)
+        code = generate_code_text(msg_norm, language=lang)
+        if code:
+            sources.append(('code', {'content': code, 'language': lang}))
+        else:
+            sources.append(('code', {'content': f"Sorry, code generation failed. Please specify the language and what you want.", 'language': lang}))
+    # 6. Speech (explicit request, robust to vague/bad input)
     topic, tone, audience, length = extract_speech_request(msg_norm)
     if topic:
-        speech = generate_speech_text(topic, tone, audience, length)
-        return speech or "Speech generation unavailable."
+        # If topic is still None or too short, try using the whole message
+        if not topic or len(topic.strip()) < 3:
+            topic = msg_corrected.strip()
+        if not topic or len(topic) < 3:
+            sources.append(('speech', "Sorry, I couldn't understand your speech topic. Please rephrase."))
+        else:
+            speech = generate_speech_text(topic, tone or 'neutral', audience or 'general audience', length or 'short')
+            if speech:
+                sources.append(('speech', speech))
+            else:
+                sources.append(('speech', "Speech generation unavailable."))
     # 7. Intent/KB
-    intent_reply = get_intent_response(msg)
+    intent_reply = get_intent_response(msg_corrected)
     if intent_reply:
-        return intent_reply
-    kb_reply = get_from_knowledge_base(msg)
+        sources.append(('intent', intent_reply))
+    kb_reply = get_from_knowledge_base(msg_corrected)
     if kb_reply:
-        return kb_reply
+        sources.append(('kb', kb_reply))
     # 8. Memory/context
     if username:
         recent = get_recent_conversation(username, n=5)
         if recent:
             context = '\n'.join([f"User: {r['user_msg']}\nAI: {r['bot_reply']}" for r in recent])
-            mem_reply = llm_fallback(msg, context=context)
+            # Use free LLM for context-based answer
+            mem_reply = free_llm_generate(f"{msg}\n\nContext:\n{context}", task='text')
             if mem_reply:
-                return mem_reply
-    # 9. LLM fallback
-    llm_reply = llm_fallback(msg)
+                sources.append(('memory', mem_reply))
+    # 9. LLM fallback (free only)
+    llm_reply = free_llm_generate(msg_corrected, task='text')
     if llm_reply:
-        return llm_reply
+        sources.append(('llm', llm_reply))
     # 10. Google fallback
-    return ask_google(msg)
+    google_reply = ask_google(msg_corrected)
+    if google_reply:
+        sources.append(('google', google_reply))
+    # 11. Website cross-reference (if query is informational)
+    if any(q in msg_norm for q in ['what', 'who', 'when', 'where', 'why', 'how', '?']):
+        try:
+            summary = wikipedia.summary(msg_corrected, sentences=2)
+            sources.append(('wikipedia', f"Wikipedia: {summary}"))
+        except Exception:
+            pass
+    # --- Synthesize best answer ---
+    priority = ['math', 'code', 'speech', 'intent', 'kb', 'file', 'files', 'memory', 'llm', 'tool', 'google', 'wikipedia', 'image', 'time', 'location']
+    for p in priority:
+        for src, val in sources:
+            if src == p and val:
+                if username and personality:
+                    if src == 'code' and isinstance(val, dict):
+                        return {'type': 'code', 'content': val['content'], 'language': val['language'], 'personality': personality}
+                    val = adapt_response_style(val, personality)
+                return val
+    # Fallback: concatenate all sources
+    if sources:
+        result = '\n\n'.join([f"[{src}] {val}" for src, val in sources if val])
+        if username and personality:
+            result = adapt_response_style(result, personality)
+        return result
+    return "Sorry, I didn't understand. Please try again with a clearer question or request."
 
-# Ensure get_uploaded_file_content is defined only once and before all usages
+# --- Response Style Adapter ---
+def adapt_response_style(response, personality):
+    """
+    Modifies the response style/tone based on detected personality traits.
+    """
+    # Formality
+    if personality.get('formality') == 'formal':
+        response = f"Dear user, {response}".replace('!', '.')
+    # Humor
+    # (Removed emoji addition)
+    # Directness
+    if personality.get('directness') == 'direct':
+        response = response.replace('I think', 'Here you go:').replace('Maybe', 'Definitely')
+    # Emoji usage
+    # (Removed emoji addition)
+    # Greeting style
+    if personality.get('greeting_style') == 'casual':
+        response = "Hey! " + response
+    # Serious tone
+    if personality.get('preferred_tone') == 'serious':
+        response = response.replace('!', '.')
+    return response
+
+# --- Tool/Plugin Execution (WolframAlpha, Wikipedia, Calculator, etc.) ---
+def call_tool_plugin(query):
+    """
+    Calls external APIs/tools for advanced queries (math, facts, code search, etc.).
+    Returns the tool result or None.
+    """
+    # Example: WolframAlpha
+    if 'calculate' in query or 'math' in query or 'solve' in query:
+        appid = os.getenv('WOLFRAMALPHA_APPID')
+        if appid:
+            try:
+                import wolframalpha
+                client = wolframalpha.Client(appid)
+                res = client.query(query)
+                answer = next(res.results).text
+                return f"WolframAlpha: {answer}"
+            except Exception:
+                pass
+    # Example: Wikipedia
+    if 'wikipedia' in query or 'who is' in query or 'what is' in query:
+        try:
+            import wikipedia
+            summary = wikipedia.summary(query, sentences=2)
+            return f"Wikipedia: {summary}"
+        except Exception:
+            pass
+    # Add more plugins/tools as needed
+    return None
+
+# --- Multi-Document/Context Q&A ---
+def get_all_uploaded_files():
+    """
+    Returns a list of all uploaded file names in the uploads directory.
+    """
+    try:
+        return [f for f in os.listdir(UPLOADS_DIR) if os.path.isfile(os.path.join(UPLOADS_DIR, f))]
+    except Exception:
+        return []
+
+def multi_file_semantic_qa(question):
+    """
+    Searches all uploaded files for the best answer to the question using semantic_doc_qa.
+    Returns the best answer and file name.
+    """
+    best_score = 0
+    best_answer = None
+    best_file = None
+    for fname in get_all_uploaded_files():
+        content, err = get_uploaded_file_content(fname)
+        if content:
+            answer = semantic_doc_qa(question, content)
+            if answer:
+                # Use TF-IDF similarity as a proxy for score
+                _, score = semantic_similarity(question, [answer])
+                if score > best_score:
+                    best_score = score
+                    best_answer = answer
+                    best_file = fname
+    if best_answer:
+        return f"From {best_file}: {best_answer}"
+    return None
+
+# --- Uploaded File Content Extraction ---
 def get_uploaded_file_content(filename):
     """
     Retrieves and returns the content of an uploaded file by filename.
@@ -1055,292 +1453,6 @@ def get_uploaded_file_content(filename):
     except Exception as e:
         return None, f"File extraction error: {e}"
 
-# --- Multi-Document/Context Q&A ---
-def get_all_uploaded_files():
-    """
-    Returns a list of all uploaded file names in the uploads directory.
-    """
-    try:
-        return [f for f in os.listdir(UPLOADS_DIR) if os.path.isfile(os.path.join(UPLOADS_DIR, f))]
-    except Exception:
-        return []
-
-def multi_file_semantic_qa(question):
-    """
-    Searches all uploaded files for the best answer to the question using semantic_doc_qa.
-    Returns the best answer and file name.
-    """
-    best_score = 0
-    best_answer = None
-    best_file = None
-    for fname in get_all_uploaded_files():
-        content, err = get_uploaded_file_content(fname)
-        if content:
-            answer = semantic_doc_qa(question, content)
-            if answer:
-                # Use TF-IDF similarity as a proxy for score
-                _, score = semantic_similarity(question, [answer])
-                if score > best_score:
-                    best_score = score
-                    best_answer = answer
-                    best_file = fname
-    if best_answer:
-        return f"From {best_file}: {best_answer}"
-    return None
-
-# --- Tool/Plugin Execution (WolframAlpha, Wikipedia, Calculator, etc.) ---
-def call_tool_plugin(query):
-    """
-    Calls external APIs/tools for advanced queries (math, facts, code search, etc.).
-    Returns the tool result or None.
-    """
-    # Example: WolframAlpha
-    if 'calculate' in query or 'math' in query or 'solve' in query:
-        appid = os.getenv('WOLFRAMALPHA_APPID')
-        if appid:
-            try:
-                import wolframalpha
-                client = wolframalpha.Client(appid)
-                res = client.query(query)
-                answer = next(res.results).text
-                return f"WolframAlpha: {answer}"
-            except Exception:
-                pass
-    # Example: Wikipedia
-    if 'wikipedia' in query or 'who is' in query or 'what is' in query:
-        try:
-            import wikipedia
-            summary = wikipedia.summary(query, sentences=2)
-            return f"Wikipedia: {summary}"
-        except Exception:
-            pass
-    # Add more plugins/tools as needed
-    return None
-
-# --- Advanced Code Analysis: Bug Detection & Suggestions ---
-def analyze_code(code, language='python'):
-    """
-    Uses LLM and static analysis to find bugs, suggest improvements, and explain errors.
-    """
-    suggestion = llm_fallback(f"Find bugs, explain errors, and suggest improvements for this {language} code:\n{code}")
-    static_result = None
-    if language == 'python':
-        try:
-            import ast
-            import pyflakes.api
-            import pyflakes.reporter
-            from io import StringIO
-            buf = StringIO()
-            reporter = pyflakes.reporter.Reporter(buf, buf)
-            pyflakes.api.check(code, '<string>', reporter=reporter)
-            static_result = buf.getvalue()
-        except Exception:
-            static_result = None
-    return suggestion, static_result
-
-# --- Continual Learning: Log User Feedback & Unhandled Queries ---
-def log_user_feedback(username, query, feedback):
-    """
-    Logs user feedback to a feedback.json file.
-    """
-    try:
-        record = {
-            "username": username,
-            "query": query,
-            "feedback": feedback,
-            "timestamp": time.time()
-        }
-        if os.path.exists('feedback.json'):
-            with open('feedback.json', 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        else:
-            data = []
-        data.append(record)
-        with open('feedback.json', 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        print(f"[ERROR] log_user_feedback: {e}")
-
-
-def save_user_preference(username, key, value):
-    try:
-        if os.path.exists('user_data.json'):
-            with open('user_data.json', 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        else:
-            data = {}
-        if username not in data:
-            data[username] = {}
-        if 'preferences' not in data[username]:
-            data[username]['preferences'] = {}
-        data[username]['preferences'][key] = value
-        with open('user_data.json', 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        print(f"[ERROR] save_user_preference: {e}")
-
-
-def get_user_preference(username, key):
-    try:
-        if os.path.exists('user_data.json'):
-            with open('user_data.json', 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return data.get(username, {}).get('preferences', {}).get(key)
-    except Exception as e:
-        print(f"[ERROR] get_user_preference: {e}")
-    return None
-
-
-def speech_to_text(audio_path):
-    try:
-        import speech_recognition as sr
-        r = sr.Recognizer()
-        with sr.AudioFile(audio_path) as source:
-            audio = r.record(source)
-        return r.recognize_google(audio)
-    except Exception as e:
-        return f"Speech-to-text error: {e}"
-
-
-def text_to_speech(text, output_path):
-    try:
-        import pyttsx3
-        engine = pyttsx3.init()
-        engine.save_to_file(text, output_path)
-        engine.runAndWait()
-        return output_path
-    except Exception as e:
-        return f"Text-to-speech error: {e}"
-
-# --- Emotion & Intent Detection (Advanced) ---
-def detect_emotion(text):
-    """
-    Detects emotion in text using text2emotion (if available).
-    Returns a dict of emotions.
-    """
-    try:
-        import text2emotion as t2e
-        return t2e.get_emotion(text)
-    except Exception:
-        return {}
-
-def generate_speech_text(topic, tone=None, audience=None, length=None):
-    """
-    Generates a speech text based on topic, tone, audience, and length using templates.
-    """
-    # Basic templates
-    base = f"Dear {audience or 'friends'},\n\n" if audience else "Ladies and gentlemen,\n\n"
-    if not topic:
-        topic = "something important"
-    if tone == 'funny':
-        body = f"Today, let's talk about {topic}. Now, I know what you're thinking: 'Oh no, not {topic} again!' But don't worry, I'll try to keep it entertaining."
-    elif tone == 'motivational':
-        body = f"Today, I want to inspire you about {topic}. Remember, every great achievement starts with a single step. Let's embrace {topic} with courage and determination!"
-    elif tone == 'serious':
-        body = f"Today, we must address the serious matter of {topic}. It is crucial that we understand its impact and work together for a better future."
-    elif tone == 'sad':
-        body = f"It's with a heavy heart that I speak about {topic} today. Sometimes, life brings challenges, and {topic} is one of them. But together, we can find hope."
-    else:
-        body = f"I would like to share my thoughts on {topic}. It's a subject that affects us all in different ways."
-    # Adjust length
-    if length == 'short':
-        closing = "Thank you."
-    elif length == 'long':
-        closing = f"In conclusion, {topic} is something we should all reflect on. Thank you for your attention, and let's continue this conversation beyond today."
-        body += "\n\nLet me elaborate further. " + (
-            f"{topic.capitalize()} has many facets, and its importance cannot be overstated. "
-            f"Whether you are young or old, {topic} touches your life. "
-            f"Let's work together to make a positive difference. "
-        )
-    else:
-        closing = "Thank you for listening."
-    return f"{base}{body}\n\n{closing}"
-
-# --- Enhanced get_response with all new capabilities ---
-def get_response(msg, username=None, file_context=None, all_files=False, feedback=None):
-    msg_norm = normalize_grammar(msg)
-    # 0. Tool/plugin execution
-    tool_result = call_tool_plugin(msg_norm)
-    if tool_result:
-        return tool_result
-    # 0.5. Location Q&A
-    if any(q in msg_norm for q in ["where am i", "what's my location", "where are we", "my location", "where is my location"]):
-        if username:
-            loc = get_user_location_from_file(username)
-            if loc:
-                return f"Your location: {loc.get('city', 'Unknown')}, {loc.get('region', '')}, {loc.get('country', '')} (lat: {loc.get('lat', '?')}, lon: {loc.get('lon', '?')})"
-            else:
-                return "Sorry, I couldn't determine your location."
-        else:
-            return "I need your username to look up your location."
-    # 0.6. Local time Q&A
-    if any(q in msg_norm for q in ["what time is it", "what's the time", "local time", "current time", "my time", "what time is it here"]):
-        if username:
-            loc = get_user_location_from_file(username)
-            if loc:
-                return get_local_time(loc)
-            else:
-                return "Sorry, I couldn't determine your location to get the time."
-        else:
-            return "I need your username to look up your local time."
-    # 1. Math
-    math_reply = handle_math(msg_norm)
-    if math_reply:
-        return math_reply
-    # 2. Image generation
-    if any(w in msg_norm for w in ["draw", "generate image", "create image", "picture", "art"]):
-        return generate_image_from_prompt(msg)
-    # 3. Multi-file Q&A
-    if all_files:
-        answer = multi_file_semantic_qa(msg)
-        if answer:
-            return answer
-    # 4. File Q&A (if file_context provided)
-    if file_context:
-        content, err = get_uploaded_file_content(file_context)
-        if content:
-            answer = semantic_doc_qa(msg, content)
-            if answer:
-                return f"From your file: {answer}"
-            return f"File content: {content[:500]}..."
-        elif err:
-            return err
-    # 5. Code generation (explicit request)
-    if re.search(r'(generate|write|show|give) (me )?(code|javascript|python|java|c\+\+|c#|typescript|html|css)', msg_norm):
-        lang = extract_language(msg_norm)
-        # Simple template for common code requests
-        if lang == 'javascript' and 'print' in msg_norm and 'console' in msg_norm:
-            return """```javascript\nconsole.log('im so good');\n```"""
-        # Add more templates for other languages as needed
-        # Fallback: polite message
-        return f"Sorry, I can only generate code for specific requests. Please specify the language and what you want."
-    # 6. Speech (template-based, no OpenAI)
-    topic, tone, audience, length = extract_speech_request(msg_norm)
-    if topic:
-        speech = generate_speech_text(topic, tone, audience, length)
-        return speech or "Speech generation unavailable."
-    # 7. Intent/KB
-    intent_reply = get_intent_response(msg)
-    if intent_reply:
-        return intent_reply
-    kb_reply = get_from_knowledge_base(msg)
-    if kb_reply:
-        return kb_reply
-    # 8. Memory/context
-    if username:
-        recent = get_recent_conversation(username, n=5)
-        if recent:
-            context = '\n'.join([f"User: {r['user_msg']}\nAI: {r['bot_reply']}" for r in recent])
-            mem_reply = llm_fallback(msg, context=context)
-            if mem_reply:
-                return mem_reply
-    # 9. LLM fallback
-    llm_reply = llm_fallback(msg)
-    if llm_reply:
-        return llm_reply
-    # 10. Google fallback
-    return ask_google(msg)
-
 # --- API Endpoints ---
 @app.route('/api/chats')
 def api_chats():
@@ -1362,19 +1474,28 @@ def api_chats():
     except Exception as e:
         return jsonify([])
 
+@app.route('/dev-login', methods=['GET', 'POST'])
+def dev_login():
+    error = None
+    print('Session at /dev-login:', dict(session))  # Debug log
+    if request.method == 'POST':
+        password = request.form.get('password')
+        if password == os.getenv('DEV_MODE_PASSWORD', 'supersecret'):
+            session['dev_mode'] = True
+            print('Login successful, session:', dict(session))  # Debug log
+            return redirect(url_for('dev'))
+        else:
+            error = 'Incorrect password.'
+            print('Login failed, session:', dict(session))  # Debug log
+    return render_template('dev_login.html', error=error)
+
 @app.route('/dev', methods=['GET', 'POST'])
 def dev():
-    # If not logged in, show login form as subpage
+    print('Session at /dev:', dict(session))  # Debug log
     if not session.get('dev_mode'):
-        error = None
-        if request.method == 'POST':
-            password = request.form.get('password')
-            if password == DEV_MODE_PASSWORD:
-                session['dev_mode'] = True
-                return redirect(url_for('dev'))
-            error = 'Incorrect password'
-        return render_template('dev_login.html', error=error)
-    # If logged in, show dev panel as subpage
+        print('Not logged in, redirecting to /dev-login')  # Debug log
+        return redirect(url_for('dev_login'))
+    print('Logged in, rendering dev_panel.html')  # Debug log
     return render_template('dev_panel.html')
 
 @app.route('/dev/exec', methods=['POST'])
@@ -1388,6 +1509,35 @@ def dev_exec():
         return jsonify({'output': output, 'error': err})
     # Add more advanced ML/hacking tools here as needed
     return jsonify({'error': 'Language not supported in dev mode.'})
+
+@app.route('/dev/code-assistant')
+@dev_mode_required
+def code_assistant():
+    return render_template('code_assistant.html')
+
+@app.route('/api/code-assistant-chat', methods=['POST'])
+def api_code_assistant_chat():
+    data = request.get_json()
+    message = data.get('message', '')
+    code = data.get('code', '')
+    language = data.get('language', 'python')
+    # Use your AI backend for code help
+    ai_reply = free_llm_generate(message, task='code')
+    # Optionally execute code
+    output = ''
+    if code.strip():
+        try:
+            if language == 'python':
+                import io, contextlib
+                f = io.StringIO()
+                with contextlib.redirect_stdout(f):
+                    exec(code, {})
+                output = f.getvalue()
+            else:
+                output = 'Code execution only supported for Python.'
+        except Exception as e:
+            output = f'Error: {e}'
+    return jsonify({'reply': ai_reply, 'output': output})
 
 # --- Self-improving/Auto-coding ability ---
 def self_modify_code(new_code, target_file):
@@ -1410,6 +1560,50 @@ def dev_self_modify():
     success, err = self_modify_code(new_code, target_file)
     return jsonify({'success': success, 'error': err})
 
+@app.route('/dev/gemini_models')
+@dev_mode_required
+def dev_gemini_models():
+    """
+    Lists available Gemini models and their supported methods for the current API key.
+    """
+    gemini_key = os.getenv('GEMINI_API_KEY')
+    if not gemini_key:
+        return render_template('gemini_models.html', error='GEMINI_API_KEY not set in environment.', models=[])
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=gemini_key)
+        models = genai.list_models()
+        model_list = []
+        for m in models:
+            model_list.append({
+                'name': getattr(m, 'name', str(m)),
+                'supported_generation_methods': getattr(m, 'supported_generation_methods', [])
+            })
+        return render_template('gemini_models.html', models=model_list)
+    except Exception as e:
+        return render_template('gemini_models.html', error=str(e), models=[])
+
+@app.route('/api/gemini_image', methods=['POST'])
+def api_gemini_image():
+    data = request.get_json()
+    prompt = data.get('prompt', '')
+    result = generate_image_text(prompt)
+    return jsonify({'result': result})
+
+@app.route('/api/gemini_video', methods=['POST'])
+def api_gemini_video():
+    data = request.get_json()
+    prompt = data.get('prompt', '')
+    result = generate_video_text(prompt)
+    return jsonify({'result': result})
+
+@app.route('/api/gemini_audio', methods=['POST'])
+def api_gemini_audio():
+    data = request.get_json()
+    prompt = data.get('prompt', '')
+    result = generate_audio_text(prompt)
+    return jsonify({'result': result})
+
 @app.before_request
 def auto_update_user_location():
     if request.endpoint not in ('static',):
@@ -1418,8 +1612,101 @@ def auto_update_user_location():
             ip = request.headers.get('X-Forwarded-For', request.remote_addr)
             update_user_location(username, ip)
 
+# --- System Resource Monitoring (CPU, GPU, Energy) ---
+def get_system_stats():
+    """
+    Returns a dict with current CPU, GPU, RAM, and energy usage stats.
+    """
+    stats = {}
+    try:
+        import psutil
+        stats['cpu_percent'] = psutil.cpu_percent(interval=1)
+        stats['ram_percent'] = psutil.virtual_memory().percent
+        stats['ram_used'] = psutil.virtual_memory().used // (1024*1024)
+        stats['ram_total'] = psutil.virtual_memory().total // (1024*1024)
+    except Exception:
+        stats['cpu_percent'] = stats['ram_percent'] = stats['ram_used'] = stats['ram_total'] = None
+    # GPU stats (NVIDIA only)
+    try:
+        import GPUtil
+        gpus = GPUtil.getGPUs()
+        if gpus:
+            stats['gpu_percent'] = gpus[0].load * 100
+            stats['gpu_mem_used'] = gpus[0].memoryUsed
+            stats['gpu_mem_total'] = gpus[0].memoryTotal
+        else:
+            stats['gpu_percent'] = stats['gpu_mem_used'] = stats['gpu_mem_total'] = None
+    except Exception:
+        stats['gpu_percent'] = stats['gpu_mem_used'] = stats['gpu_mem_total'] = None
+    # Energy (battery)
+    try:
+        import psutil
+        battery = psutil.sensors_battery()
+        if battery:
+            stats['battery_percent'] = battery.percent
+            stats['power_plugged'] = battery.power_plugged
+        else:
+            stats['battery_percent'] = stats['power_plugged'] = None
+    except Exception:
+        stats['battery_percent'] = stats['power_plugged'] = None
+    return stats
+
+@app.route('/api/system_stats')
+def api_system_stats():
+    return jsonify(get_system_stats())
+
+@app.route('/api/image_understand', methods=['POST'])
+def api_image_understand():
+    try:
+        image_file = request.files.get('image')
+        question = request.form.get('question', 'Describe this image')
+        if not image_file:
+            return jsonify({'error': 'No image uploaded.'})
+        img_bytes = image_file.read()
+        img_b64 = base64.b64encode(img_bytes).decode('utf-8')
+        gemini_key = os.getenv('GEMINI_API_KEY')
+        if not gemini_key:
+            return jsonify({'error': 'Gemini API key missing.'})
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=gemini_key)
+            model = genai.GenerativeModel('gemini-pro-vision')
+            # Gemini expects image as bytes, not base64, so pass img_bytes
+            response = model.generate_content([question, img_bytes])
+            result = response.text.strip() if hasattr(response, 'text') else str(response)
+            return jsonify({'result': result})
+        except Exception as e:
+            return jsonify({'error': f'Gemini Vision error: {e}'})
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+def generate_code_text(prompt, language='en'):
+    """Generate code using free_llm_generate."""
+    return free_llm_generate(prompt, task='code', language=language)
+
+def generate_speech_text(topic, tone, audience, length):
+    """Generate speech using free_llm_generate."""
+    prompt = f"Write a {length} speech about {topic} for {audience} in a {tone} tone."
+    return free_llm_generate(prompt, task='speech')
+
+def generate_image_text(prompt):
+    """Generate image using free_llm_generate."""
+    return free_llm_generate(prompt, task='image')
+
+def generate_video_text(prompt):
+    """Generate video using free_llm_generate."""
+    return free_llm_generate(prompt, task='video')
+
+def generate_audio_text(prompt):
+    """Generate audio/dialogue using free_llm_generate."""
+    return free_llm_generate(prompt, task='audio')
+
+def generate_embedding_text(prompt):
+    """Generate embedding using free_llm_generate."""
+    return free_llm_generate(prompt, task='embedding')
+
+# Example usage:
 if __name__ == "__main__":
-    import sys
     if len(sys.argv) > 1 and sys.argv[1] == "cli":
         print("DIZI AI Chatbot CLI Mode\nType 'exit' to quit.")
         username = input("Enter your username: ").strip() or "cli_user"
@@ -1430,8 +1717,9 @@ if __name__ == "__main__":
                 break
             reply = get_response(msg, username=username)
             print(f"AI: {reply}")
+    # Add a CLI option to list Gemini models
+    elif len(sys.argv) > 1 and sys.argv[1] == "list_gemini_models":
+        result = get_gemini_models()
+        print(result)
     else:
         app.run(debug=True)
-
-
-
