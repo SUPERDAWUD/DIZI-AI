@@ -4,7 +4,6 @@ nltk
 sympy
 requests
 python-dotenv
-serpapi
 Pillow
 replicate
 pytz
@@ -22,4 +21,5 @@ sentence-transformers
 openai
 text2emotion
 werkzeug
-
+serpapi
+pdf2image
