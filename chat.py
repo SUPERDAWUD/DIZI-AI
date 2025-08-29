@@ -1,3 +1,25 @@
+# --- Device selection for inference (CPU/GPU) ---
+from flask import request as flask_request
+inference_device = 'auto'
+
+if 'app' in globals():
+    @app.route('/api/set-device', methods=['POST'])
+    @dev_mode_required
+    def set_device():
+        global inference_device
+        data = flask_request.get_json()
+        device = data.get('device', 'auto')
+        inference_device = device
+        # Update LocalGPT device
+        if hasattr(local_gpt, 'set_device'):
+            local_gpt.set_device(device)
+        return jsonify({'device': device})
+# --- Deep Learning Predictor ---
+from predictor import predict
+# --- Ask Gemini: wrapper for free_llm_generate (text) ---
+def ask_gemini(prompt):
+    """Call Gemini LLM for text generation."""
+    return free_llm_generate(prompt, task='text')
 import os
 import json
 import torch
@@ -25,6 +47,10 @@ from functools import wraps
 import sys
 import wikipedia
 import google.generativeai as genai
+# --- Local GPT and RAG ---
+from gpt_local import LocalGPT
+# --- Initialize Local GPT Model (load once) ---
+local_gpt = LocalGPT('all')
 
 # --- Flask App Initialization (ensure only one app instance) ---
 if 'app' not in globals():
@@ -669,10 +695,10 @@ def timeout_handler(signum, frame):
     raise TimeoutException()
 
 def handle_math(msg):
-    x, y = symbols("x y")
+    from sympy import Matrix, Derivative, Integral, limit, summation, Product, Symbol, sin, cos, tan, log, sqrt, pi, E
+    x, y, z = symbols("x y z")
     original_msg = msg.strip()
     msg = original_msg.lower().replace("^", "**")
-    # Preprocess: remove common math question prefixes
     math_prefixes = [
         "what is ", "whats ", "what's ", "calculate ", "solve ", "compute ", "evaluate ", "find ", "give me ", "tell me ", "can you solve ", "can you calculate ", "can you evaluate ", "can you compute "
     ]
@@ -682,15 +708,85 @@ def handle_math(msg):
             break
     try:
         signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(2)  # 2 second timeout
-        # Only evaluate if the message contains at least one operator and is not just a number
+        signal.alarm(3)  # 3 second timeout
+        # Matrix support
+        if msg.startswith("matrix"):
+            # Example: matrix [[1,2],[3,4]] * [[5,6],[7,8]]
+            expr = msg.replace("matrix", "").strip()
+            try:
+                matrices = re.findall(r'\[\[.*?\]\]', expr)
+                mats = [Matrix(eval(m)) for m in matrices]
+                if '*' in expr or 'x' in expr:
+                    result = mats[0] * mats[1]
+                else:
+                    result = mats[0]
+                signal.alarm(0)
+                return f"Matrix result: {result}"
+            except Exception as e:
+                signal.alarm(0)
+                return f"Matrix error: {e}"
+        # Calculus: derivative, integral, limit
+        if msg.startswith("derivative") or msg.startswith("differentiate"):
+            expr = msg.replace("derivative", "").replace("differentiate", "").strip()
+            result = diff(expr)
+            signal.alarm(0)
+            return f"Derivative: {result}"
+        if msg.startswith("integral") or msg.startswith("integrate"):
+            expr = msg.replace("integral", "").replace("integrate", "").strip()
+            result = integrate(expr)
+            signal.alarm(0)
+            return f"Integral: {result}"
+        if msg.startswith("limit"):
+            # Example: limit sin(x)/x, x, 0
+            parts = msg.replace("limit", "").strip().split(',')
+            if len(parts) == 3:
+                expr, var, val = parts
+                result = limit(expr, Symbol(var.strip()), float(val.strip()))
+                signal.alarm(0)
+                return f"Limit: {result}"
+        if msg.startswith("sum") or msg.startswith("summation"):
+            # Example: sum x, (x, 1, 10)
+            expr = msg.replace("sum", "").replace("summation", "").strip()
+            m = re.match(r'(.+),\s*\((.+),\s*(.+),\s*(.+)\)', expr)
+            if m:
+                f, v, a, b = m.groups()
+                result = summation(f, Symbol(v.strip()), int(a), int(b))
+                signal.alarm(0)
+                return f"Summation: {result}"
+        if msg.startswith("product"):
+            # Example: product x, (x, 1, 5)
+            expr = msg.replace("product", "").strip()
+            m = re.match(r'(.+),\s*\((.+),\s*(.+),\s*(.+)\)', expr)
+            if m:
+                f, v, a, b = m.groups()
+                result = Product(f, Symbol(v.strip()), int(a), int(b)).doit()
+                signal.alarm(0)
+                return f"Product: {result}"
+        # Statistics: mean, std, variance
+        if msg.startswith("mean"):
+            nums = [float(n) for n in re.findall(r'-?\d+\.?\d*', msg)]
+            result = sum(nums) / len(nums)
+            signal.alarm(0)
+            return f"Mean: {result}"
+        if msg.startswith("std") or msg.startswith("standard deviation"):
+            nums = [float(n) for n in re.findall(r'-?\d+\.?\d*', msg)]
+            mean = sum(nums) / len(nums)
+            result = (sum((x - mean) ** 2 for x in nums) / len(nums)) ** 0.5
+            signal.alarm(0)
+            return f"Standard deviation: {result}"
+        if msg.startswith("variance"):
+            nums = [float(n) for n in re.findall(r'-?\d+\.?\d*', msg)]
+            mean = sum(nums) / len(nums)
+            result = sum((x - mean) ** 2 for x in nums) / len(nums)
+            signal.alarm(0)
+            return f"Variance: {result}"
+        # Fallback: try to evaluate as expression
         if re.search(r"[\+\-\*/]", msg) and not re.fullmatch(r"\d+", msg):
             result = sympy.sympify(msg).evalf()
             signal.alarm(0)
             if result == int(result):
                 result = int(result)
             return f"The answer is {result}"
-        # Try original message if it contains operators and is not just a number
         if re.search(r"[\+\-\*/]", original_msg) and not re.fullmatch(r"\d+", original_msg):
             result = sympy.sympify(original_msg).evalf()
             signal.alarm(0)
@@ -715,12 +811,6 @@ def handle_math(msg):
         if msg.startswith("factor"):
             signal.alarm(0)
             return f"Factored: {factor(msg.replace('factor', '').strip())}"
-        if msg.startswith("differentiate"):
-            signal.alarm(0)
-            return f"Derivative: {diff(msg.replace('differentiate', '').strip())}"
-        if msg.startswith("integrate"):
-            signal.alarm(0)
-            return f"Integral: {integrate(msg.replace('integrate', '').strip())}"
         signal.alarm(0)
     except TimeoutException:
         return "Math error: Calculation took too long. Please try a simpler question."
@@ -1207,10 +1297,44 @@ def analyze_user_personality(username, msg):
 
 # --- Enhanced get_response: synthesize from all sources and adapt personality ---
 def get_response(msg, username=None, file_context=None, all_files=False, feedback=None):
-    # Apply spelling correction and grammar normalization
+    # --- Intent check FIRST for instant response ---
     msg_corrected = correct_sentence(msg)
     msg_norm = normalize_grammar(msg_corrected)
+    intent_reply = get_intent_response(msg_corrected)
+    if intent_reply:
+        return intent_reply
+    # --- Model/Personality selection per user ---
+    import flask
+    model = flask.session.get('model')
+    personality = flask.session.get('personality')
     sources = []
+    # If not set, try user_data.json
+    if username and (not model or not personality):
+        try:
+            with open('user_data.json', 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            user = data.get(username, {})
+            if not model:
+                model = user.get('preferred_model', 'all')
+            if not personality:
+                personality = user.get('preferred_personality', 'friendly')
+        except Exception:
+            model = model or 'all'
+            personality = personality or 'friendly'
+    model = model or 'all'
+    personality = personality or 'friendly'
+    # Set model/personality for local_gpt
+    local_gpt.set_model(model, personality)
+    # 0.1. Data Prediction (user can ask: predict [data])
+    if msg_norm.lower().startswith('predict '):
+        try:
+            # Example: predict 1,2,3;4,5,6 (rows separated by ;)
+            data_str = msg_norm[8:].strip()
+            rows = [list(map(float, row.split(','))) for row in data_str.split(';')]
+            pred = predict(rows)
+            sources.append(('prediction', f"Prediction: {pred}"))
+        except Exception as e:
+            sources.append(('prediction', f"Prediction error: {e}"))
     # --- Personality adaptation ---
     personality = analyze_user_personality(username, msg) if username else {}
     # 0. Tool/plugin execution
@@ -1285,10 +1409,43 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
     # 7. Intent/KB
     intent_reply = get_intent_response(msg_corrected)
     if intent_reply:
-        sources.append(('intent', intent_reply))
+        # Return immediately for clear intent matches (like greetings)
+        return intent_reply
     kb_reply = get_from_knowledge_base(msg_corrected)
     if kb_reply:
         sources.append(('kb', kb_reply))
+
+    # 7.5. Gemini primary, Local GPT+RAG fallback (with user model/personality)
+    gemini_reply = None
+    try:
+        gemini_reply = ask_gemini(msg_corrected)
+    except Exception as e:
+        gemini_reply = None
+    if gemini_reply:
+        sources.append(('gemini', gemini_reply))
+    else:
+        # Local GPT + RAG fallback (using user model/personality)
+        def retrieve_kb_context(query, kb=knowledge_base, top_n=3):
+            matches = []
+            for q, a in kb.items():
+                if q and query.lower() in q:
+                    matches.append((q, a))
+            # Fallback: fuzzy match if not enough
+            if len(matches) < top_n:
+                for q, a in kb.items():
+                    if len(matches) >= top_n:
+                        break
+                    if query.lower() in a.lower() and (q, a) not in matches:
+                        matches.append((q, a))
+            return matches[:top_n]
+
+        kb_context = retrieve_kb_context(msg_corrected)
+        if kb_context:
+            context_str = '\n'.join([f"Q: {q}\nA: {a}" for q, a in kb_context])
+            prompt = f"You are a helpful AI assistant. Use the following knowledge base to answer the user's question.\n{context_str}\nUser: {msg_corrected}\nAI:"
+            gpt_rag_reply = local_gpt.generate(prompt, max_length=180)
+            if gpt_rag_reply:
+                sources.append(('gpt_rag', gpt_rag_reply))
     # 8. Memory/context
     if username:
         recent = get_recent_conversation(username, n=5)

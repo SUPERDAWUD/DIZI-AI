@@ -22,12 +22,36 @@
             <h2>Welcome to the Developer Panel!</h2>
             <p>If you see this page, you are logged in as a developer. All dev tools are available below.</p>
         </div>
-        <div class="section">
-            <h2>Gemini Model Info</h2>
-            <form action="/dev/gemini_models" method="get">
-                <button type="submit">List Gemini Models</button>
-            </form>
-        </div>
+    <div class="section">
+      <h2>Gemini Model Info</h2>
+      <form action="/dev/gemini_models" method="get">
+        <button type="submit">List Gemini Models</button>
+      </form>
+    </div>
+    <div class="section">
+      <h2>Inference Device</h2>
+      <label for="device-select">Choose device:</label>
+      <select id="device-select" onchange="switchDevice()">
+        <option value="auto">Auto</option>
+        <option value="cuda">GPU (CUDA)</option>
+        <option value="cpu">CPU</option>
+      </select>
+      <span id="device-status" style="margin-left:1em;color:#7fd957;"></span>
+    </div>
+  <script>
+  function switchDevice() {
+    const device = document.getElementById('device-select').value;
+    fetch('/api/set-device', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device })
+    })
+    .then(res => res.json())
+    .then(data => {
+      document.getElementById('device-status').textContent = 'Now using: ' + data.device;
+    });
+  }
+  </script>
         <div class="section">
             <h2>Run Code</h2>
             <form action="/dev/exec" method="post">

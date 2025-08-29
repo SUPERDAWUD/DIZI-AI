@@ -2,18 +2,28 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Coding Assistant</title>
+    <title>VS Code Assistant</title>
     <link rel="stylesheet" href="/static/style.css">
     <style>
-        body { background: #181a1b; color: #eee; font-family: 'Segoe UI', 'Fira Mono', 'Consolas', monospace; }
-        .vscode-container { display: flex; height: 95vh; }
-        .sidebar { width: 220px; background: #23272e; color: #fff; padding: 1em; border-right: 2px solid #222; }
+        body { background: #1e1e1e; color: #d4d4d4; font-family: 'Segoe UI', 'Fira Mono', 'Consolas', monospace; margin:0; }
+        .vscode-container { display: flex; height: 100vh; }
+        .sidebar {
+            width: 250px; background: #23272e; color: #fff; border-right: 1.5px solid #222; display: flex; flex-direction: column; align-items: stretch; padding: 0;
+        }
+        .sidebar-header { background: #181a1b; padding: 1.2em 1em; font-size: 1.2em; color: #7fd957; border-bottom: 1px solid #222; text-align: center; }
+        .file-explorer { flex: 1 1 auto; overflow-y: auto; padding: 1em; }
+        .file-list { list-style: none; padding: 0; margin: 0; }
+        .file-list li { padding: 0.5em 0.7em; border-radius: 5px; cursor: pointer; transition: background 0.2s; }
+        .file-list li:hover, .file-list li.active { background: #2d2d2d; }
+        .sidebar-footer { padding: 1em; border-top: 1px solid #222; }
         .main { flex: 1; display: flex; flex-direction: column; }
-        .editor { flex: 1; background: #1e1e1e; border-bottom: 2px solid #222; }
-        .console { height: 160px; background: #181a1b; color: #7fd957; padding: 1em; font-family: 'Fira Mono', monospace; overflow-y: auto; }
-        .chatbot { height: 220px; background: #222; color: #eee; padding: 1em; border-top: 2px solid #222; overflow-y: auto; }
-        .chat-input { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #444; background: #181a1b; color: #eee; margin-top: 8px; }
-        .chat-send { background: #7fd957; color: #222; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-weight: bold; margin-top: 8px; }
+        .editor { flex: 1; background: #1e1e1e; border-bottom: 1.5px solid #222; }
+        .console { height: 120px; background: #181a1b; color: #7fd957; padding: 1em; font-family: 'Fira Mono', monospace; overflow-y: auto; border-top: 1.5px solid #222; }
+        .chatbot { height: 180px; background: #222; color: #eee; padding: 1em; border-top: 1.5px solid #222; overflow-y: auto; display: flex; flex-direction: column; }
+        .chat-messages { flex: 1 1 auto; overflow-y: auto; }
+        .chat-input-row { display: flex; gap: 0.5em; margin-top: 8px; }
+        .chat-input { flex: 1; padding: 8px; border-radius: 6px; border: 1px solid #444; background: #181a1b; color: #eee; }
+        .chat-send { background: #7fd957; color: #222; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-weight: bold; }
         .chat-send:hover { background: #6fc947; }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs/loader.js"></script>
@@ -21,42 +31,69 @@
 <body>
     <div class="vscode-container">
         <div class="sidebar">
-            <h2 style="color:#7fd957;">Files</h2>
-            <ul id="file-list" style="list-style:none;padding:0;"></ul>
+            <div class="sidebar-header">VS Code Assistant</div>
+            <div class="file-explorer">
+                <ul class="file-list" id="file-list"></ul>
+            </div>
+            <div class="sidebar-footer">
+                <button class="chat-send" onclick="newFile()">+ New File</button>
+            </div>
         </div>
         <div class="main">
             <div class="editor" id="editor"></div>
             <div class="console" id="console">Console output will appear here.</div>
             <div class="chatbot" id="chatbot">
-                <div id="chat-messages"></div>
-                <input class="chat-input" id="chat-input" placeholder="Ask the coding assistant...">
-                <button class="chat-send" onclick="sendChat()">Send</button>
+                <div class="chat-messages" id="chat-messages"></div>
+                <div class="chat-input-row">
+                    <input class="chat-input" id="chat-input" placeholder="Ask the coding assistant...">
+                    <button class="chat-send" onclick="sendChat()">Send</button>
+                </div>
             </div>
         </div>
     </div>
     <script>
     // Monaco Editor setup
     require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs' }});
+    let currentFile = 'main.py';
+    let files = {
+        'main.py': '// Start coding here...\n',
+        'utils.py': '# Utility functions\n',
+        'README.md': '# Project Info\n'
+    };
     require(['vs/editor/editor.main'], function() {
         window.editor = monaco.editor.create(document.getElementById('editor'), {
-            value: '// Start coding here...\n',
+            value: files[currentFile],
             language: 'python',
             theme: 'vs-dark',
             automaticLayout: true
         });
+        window.editor.onDidChangeModelContent(() => {
+            files[currentFile] = window.editor.getValue();
+        });
     });
-    // Dummy file list
-    const files = ['main.py', 'utils.py', 'README.md'];
-    const fileList = document.getElementById('file-list');
-    files.forEach(f => {
-        const li = document.createElement('li');
-        li.textContent = f;
-        li.style.cursor = 'pointer';
-        li.onclick = () => {
-            window.editor.setValue('// Opened ' + f + '\n');
-        };
-        fileList.appendChild(li);
-    });
+    function renderFileList() {
+        const fileList = document.getElementById('file-list');
+        fileList.innerHTML = '';
+        Object.keys(files).forEach(f => {
+            const li = document.createElement('li');
+            li.textContent = f;
+            li.className = (f === currentFile) ? 'active' : '';
+            li.onclick = () => {
+                currentFile = f;
+                window.editor.setValue(files[f]);
+                renderFileList();
+            };
+            fileList.appendChild(li);
+        });
+    }
+    function newFile() {
+        const fname = prompt('Enter new file name:');
+        if (fname && !files[fname]) {
+            files[fname] = '';
+            renderFileList();
+        }
+    }
+    renderFileList();
     // Chatbot logic (real backend)
     async function sendChat() {
         const input = document.getElementById('chat-input');

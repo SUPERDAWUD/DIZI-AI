@@ -1,5 +1,7 @@
-flask
+streamlit
+transformers
 torch
+flask
 nltk
 sympy
 requests
@@ -11,7 +13,6 @@ numpy
 PyPDF2
 python-docx
 pytesseract
-Pillow
 textblob
 scikit-learn
 gtts

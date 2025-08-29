@@ -3,7 +3,7 @@
     {
       "tag": "greeting",
       "patterns": ["hello", "hi", "hey", "what's up", "yo", "good day", "greetings", "hiya", "sup", "howdy", "hey there"],
-      "responses": ["Hey there, friend!", "Hi! How can I brighten your day?", "Hello! Ready for some fun or facts?", "Hey! Good to see you. What's on your mind?", "Yo! What's up?"]
+  "responses": ["Hey there, friend!", "Hi! How can I brighten your day?", "Hello! Ready for some fun or facts?", "Hey! Good to see you. What's on your mind?", "Yo! What's up?"]
     },
     {
       "tag": "goodbye",
