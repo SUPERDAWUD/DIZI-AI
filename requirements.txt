@@ -22,5 +22,5 @@ sentence-transformers
 openai
 text2emotion
 werkzeug==2.0.3
-serpapi==0.1.5
 pdf2image==1.16.3
+serpapi==0.1.5
