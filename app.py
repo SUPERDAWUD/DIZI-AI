@@ -1,3 +1,4 @@
+'''
 import streamlit as st
 from chat import get_response
 
@@ -16,3 +17,4 @@ if st.button("Send") and user_input.strip():
 st.markdown("---")
 for sender, msg in st.session_state['chat_history']:
     st.markdown(f"**{sender}:** {msg}")
+'''

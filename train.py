@@ -1,3 +1,25 @@
+# --- Load intents.json at the very top ---
+import json
+with open("data/intents.json", "r", encoding="utf-8") as f:
+    intents = json.load(f)
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+import pickle
+# --- Train scikit-learn intent classifier ---
+texts = []
+tags_sklearn = []
+for intent in intents['intents']:
+    for pattern in intent['patterns']:
+        texts.append(pattern)
+        tags_sklearn.append(intent['tag'])
+
+vectorizer = TfidfVectorizer(ngram_range=(1,2), stop_words='english')
+X_sklearn = vectorizer.fit_transform(texts)
+clf = LogisticRegression(max_iter=500)
+clf.fit(X_sklearn, tags_sklearn)
+with open('intent_classifier.pkl', 'wb') as f:
+    pickle.dump({'vectorizer': vectorizer, 'clf': clf}, f)
+print('Scikit-learn intent classifier trained and saved as intent_classifier.pkl')
 import json
 import torch
 import numpy as np

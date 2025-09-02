@@ -29,4 +29,4 @@ This is a Streamlit-powered AI chatbot using open-source LLMs and intent-based r
 - For advanced features (file upload, dev panel, etc.), use the Flask app or request a Streamlit UI upgrade.
 
 ---
-Made with ❤️ by DIZI CORP
+Made by D CORP inc

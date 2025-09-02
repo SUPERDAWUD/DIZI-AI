@@ -1,4 +1,3 @@
-
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -23,8 +22,8 @@ class LocalGPT:
             self.tokenizer = AutoTokenizer.from_pretrained(MODEL_REGISTRY[model_name])
             self.model = AutoModelForCausalLM.from_pretrained(
                 MODEL_REGISTRY[model_name],
-                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto"
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="cuda" if torch.cuda.is_available() else "cpu"
             )
         else:
             self.tokenizer = AutoTokenizer.from_pretrained(MODEL_REGISTRY[model_name])
@@ -38,7 +37,7 @@ class LocalGPT:
                 self.model = AutoModelForCausalLM.from_pretrained(
                     MODEL_REGISTRY[model_name],
                     torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                    device_map="auto"
+                    device_map="cuda" if torch.cuda.is_available() else "cpu"
                 )
             else:
                 self.tokenizer = AutoTokenizer.from_pretrained(MODEL_REGISTRY[model_name])

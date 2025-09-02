@@ -1,3 +1,13 @@
+import pickle
+# --- Load scikit-learn intent classifier ---
+try:
+    with open('intent_classifier.pkl', 'rb') as f:
+        intent_clf_data = pickle.load(f)
+    intent_vectorizer = intent_clf_data['vectorizer']
+    intent_clf = intent_clf_data['clf']
+except Exception:
+    intent_clf = None
+    intent_vectorizer = None
 # --- Device selection for inference (CPU/GPU) ---
 from flask import request as flask_request
 inference_device = 'auto'
@@ -338,6 +348,20 @@ def semantic_similarity(query, choices):
 
 # Improved intent response engine (fuzzy + semantic)
 def get_intent_response(msg):
+    # Use scikit-learn classifier if available
+    if intent_clf and intent_vectorizer:
+        X = intent_vectorizer.transform([msg])
+        probs = intent_clf.predict_proba(X)[0]
+        best_idx = probs.argmax()
+        best_prob = probs[best_idx]
+        best_tag = intent_clf.classes_[best_idx]
+        if best_prob > 0.7:
+            for intent in intents["intents"]:
+                if best_tag == intent["tag"]:
+                    response = random.choice(intent["responses"])
+                    fun_prefixes = ["🤖 ", "✨ ", "[AI says] ", "", "", "", "", "", "", ""]
+                    return random.choice(fun_prefixes) + response
+        # fallback to old logic if not confident
     sentence = tokenize(msg)
     X = bag_of_words(sentence, all_words)
     X = X.reshape(1, X.shape[0])
@@ -706,9 +730,97 @@ def handle_math(msg):
         if msg.startswith(prefix):
             msg = msg[len(prefix):].strip()
             break
-    try:
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(3)  # 3 second timeout
+    import concurrent.futures
+    def math_eval(expr):
+        try:
+            # Matrix support
+            if expr.startswith("matrix"):
+                expr = expr.replace("matrix", "").strip()
+                matrices = re.findall(r'\[\[.*?\]\]', expr)
+                mats = [Matrix(eval(m)) for m in matrices]
+                if '*' in expr or 'x' in expr:
+                    result = mats[0] * mats[1]
+                else:
+                    result = mats[0]
+                return f"Matrix result: {result}"
+            # Calculus: derivative, integral, limit
+            if expr.startswith("derivative") or expr.startswith("differentiate"):
+                expr2 = expr.replace("derivative", "").replace("differentiate", "").strip()
+                result = diff(expr2)
+                return f"Derivative: {result}"
+            if expr.startswith("integral") or expr.startswith("integrate"):
+                expr2 = expr.replace("integral", "").replace("integrate", "").strip()
+                result = integrate(expr2)
+                return f"Integral: {result}"
+            if expr.startswith("limit"):
+                parts = expr.replace("limit", "").strip().split(',')
+                if len(parts) == 3:
+                    expr2, var, val = parts
+                    result = limit(expr2, Symbol(var.strip()), float(val.strip()))
+                    return f"Limit: {result}"
+            if expr.startswith("sum") or expr.startswith("summation"):
+                expr2 = expr.replace("sum", "").replace("summation", "").strip()
+                m = re.match(r'(.+),\s*\((.+),\s*(.+),\s*(.+)\)', expr2)
+                if m:
+                    f, v, a, b = m.groups()
+                    result = summation(f, Symbol(v.strip()), int(a), int(b))
+                    return f"Summation: {result}"
+            if expr.startswith("product"):
+                expr2 = expr.replace("product", "").strip()
+                m = re.match(r'(.+),\s*\((.+),\s*(.+),\s*(.+)\)', expr2)
+                if m:
+                    f, v, a, b = m.groups()
+                    result = Product(f, Symbol(v.strip()), int(a), int(b)).doit()
+                    return f"Product: {result}"
+            # Statistics: mean, std, variance
+            if expr.startswith("mean"):
+                nums = [float(n) for n in re.findall(r'-?\d+\.?\d*', expr)]
+                result = sum(nums) / len(nums)
+                return f"Mean: {result}"
+            if expr.startswith("std") or expr.startswith("standard deviation"):
+                nums = [float(n) for n in re.findall(r'-?\d+\.?\d*', expr)]
+                mean = sum(nums) / len(nums)
+                result = (sum((x - mean) ** 2 for x in nums) / len(nums)) ** 0.5
+                return f"Standard deviation: {result}"
+            if expr.startswith("variance"):
+                nums = [float(n) for n in re.findall(r'-?\d+\.?\d*', expr)]
+                mean = sum(nums) / len(nums)
+                result = sum((x - mean) ** 2 for x in nums) / len(nums)
+                return f"Variance: {result}"
+            # Fallback: try to evaluate as expression
+            if re.search(r"[\+\-\*/]", expr) and not re.fullmatch(r"\d+", expr):
+                result = sympy.sympify(expr).evalf()
+                if result == int(result):
+                    result = int(result)
+                return f"The answer is {result}"
+            if re.search(r"[\+\-\*/]", original_msg) and not re.fullmatch(r"\d+", original_msg):
+                result = sympy.sympify(original_msg).evalf()
+                if result == int(result):
+                    result = int(result)
+                return f"The answer is {result}"
+            if expr.startswith("solve"):
+                expr2 = expr.replace("solve", "").strip()
+                if "=" in expr2:
+                    lhs, rhs = expr2.split("=")
+                    sol = solve(Eq(sympy.sympify(lhs), sympy.sympify(rhs)))
+                else:
+                    sol = solve(sympy.sympify(expr2))
+                return f"Solution: {sol}"
+            if expr.startswith("simplify"):
+                return f"Simplified: {simplify(expr.replace('simplify', '').strip())}"
+            if expr.startswith("expand"):
+                return f"Expanded: {expand(expr.replace('expand', '').strip())}"
+            if expr.startswith("factor"):
+                return f"Factored: {factor(expr.replace('factor', '').strip())}"
+            return None
+        except Exception as e:
+            return f"Math error: {e}"
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(math_eval, msg)
+        try:
+            return future.result(timeout=2)
+        except concurrent.futures.TimeoutError:
+            return "Math error: Calculation took too long. Please try a simpler question."
         # Matrix support
         if msg.startswith("matrix"):
             # Example: matrix [[1,2],[3,4]] * [[5,6],[7,8]]
@@ -812,10 +924,12 @@ def handle_math(msg):
             signal.alarm(0)
             return f"Factored: {factor(msg.replace('factor', '').strip())}"
         signal.alarm(0)
+    try:
+        # (Place the code that may raise TimeoutException or Exception here)
+        pass  # Replace with actual code
     except TimeoutException:
         return "Math error: Calculation took too long. Please try a simpler question."
     except Exception as e:
-        signal.alarm(0)
         return f"Math error: {e}"
     return None
 
@@ -1408,9 +1522,16 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
                 sources.append(('speech', "Speech generation unavailable."))
     # 7. Intent/KB
     intent_reply = get_intent_response(msg_corrected)
+    # Only return intent immediately for greeting, goodbye, thanks, feeling, funny, creator, capabilities
     if intent_reply:
-        # Return immediately for clear intent matches (like greetings)
-        return intent_reply
+        greeting_tags = ["greeting", "goodbye", "thanks", "feeling", "funny", "creator", "capabilities"]
+        tag = None
+        for intent in intents["intents"]:
+            if intent_reply.strip().replace("[AI says]","").replace("🤖","").replace("✨","").startswith(tuple(intent["responses"])):
+                tag = intent["tag"]
+                break
+        if tag in greeting_tags:
+            return intent_reply
     kb_reply = get_from_knowledge_base(msg_corrected)
     if kb_reply:
         sources.append(('kb', kb_reply))
