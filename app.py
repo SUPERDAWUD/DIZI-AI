@@ -1,6 +1,14 @@
-'''
+import streamlit as st
+
+# Patch: Use st.secrets for all keys
+import os
+import sys
 import streamlit as st
 from chat import get_response
+
+# Set environment variables from st.secrets for compatibility
+for key in st.secrets:
+    os.environ[key] = st.secrets[key]
 
 st.set_page_config(page_title="DIZI AI Chatbot", page_icon="🤖")
 st.title("DIZI AI Chatbot (Streamlit)")
@@ -17,4 +25,3 @@ if st.button("Send") and user_input.strip():
 st.markdown("---")
 for sender, msg in st.session_state['chat_history']:
     st.markdown(f"**{sender}:** {msg}")
-'''
