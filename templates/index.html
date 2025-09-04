@@ -40,6 +40,9 @@
     <div class="dev-mode-section" style="margin-top:1em; text-align:right;">
         <a href="/dev"><button id="dev-mode-btn" style="background:#222;color:#fff;padding:0.5em 1em;border-radius:5px;">Dev Mode</button></a>
     </div>
+    <div style="margin-top:1em;text-align:center;">
+      <button id="save-chat-btn" style="background:#7fd957;color:#222;padding:0.5em 1em;border-radius:5px;font-weight:bold;">Save This Chat</button>
+    </div>
   </div>
 
   <div class="sidebar" id="sidebar" style="position:fixed;left:0;top:0;bottom:0;width:240px;background:#181818;color:#fff;overflow-y:auto;padding:1em 0;z-index:10;display:flex;flex-direction:column;">
@@ -56,6 +59,7 @@
         <option value="chat">Conversationalist</option>
         <option value="bias">Bias GPT</option>
         <option value="oss">OSS GPT</option>
+        <option value="custom">Custom LLM (Powered by DIZI AI)</option>
       </select>
       <label for="personality-select" style="color:#7fd957;font-weight:bold;">Personality</label>
       <select id="personality-select" style="width:90%;">
@@ -72,10 +76,13 @@
     <!-- Main chat UI goes here -->
   </div>
 
-
+  <!-- Comments Section (Disqus) -->
+  <!-- Removed Disqus. Add alternative below if needed. -->
+  <!-- Example: Commento, Isso, or Utterances integration can go here. -->
 
   <script>
     let USER = null;
+    let chatHistory = [];
 
     function startChat() {
       const input = document.getElementById("username-input");
@@ -91,6 +98,7 @@
       if (!msg || !USER) return;
 
       appendMessage("You", msg);
+      chatHistory.push({ user: USER, message: msg });
       input.value = "";
 
       // Show loader
@@ -103,19 +111,43 @@
       });
 
       const data = await res.json();
-      // Hide loader
       document.getElementById("bot-loader").style.display = "none";
-      appendMessage("DIZI", data.response);
+      let botContent = data.response;
+      let followup = null;
+      if (typeof botContent === 'object' && botContent !== null) {
+        botContent = botContent.content || '';
+        followup = data.response.followup || null;
+        if (data.response.type === 'code' && data.response.content) {
+          botContent = `<pre><code>${data.response.content}</code></pre>`;
+        }
+      }
+      appendMessage("DIZI", botContent, followup);
+      chatHistory.push({ user: "DIZI", message: botContent });
     }
 
-    function appendMessage(sender, text) {
+    document.getElementById('save-chat-btn').onclick = async function() {
+      if (!USER || !chatHistory.length) return alert('No chat to save!');
+      const res = await fetch('/api/save_chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user: USER, chat: chatHistory })
+      });
+      const result = await res.json();
+      if (result.success) {
+        alert('Chat saved for user: ' + USER);
+      } else {
+        alert('Failed to save chat.');
+      }
+    }
+
+    function appendMessage(sender, text, followup) {
       const chatBox = document.getElementById("chat-box");
       const messageDiv = document.createElement("div");
       messageDiv.className = sender === "You" ? "message user" : "message bot";
       messageDiv.innerHTML = `<strong>${sender}:</strong> ${text}`;
 
       // Show image if response contains generated image URL
-      const match = text.match(/\/static\/generated\/[^\s]+\.jpg/g);
+      const match = typeof text === 'string' ? text.match(/\/static\/generated\/[\S]+\.jpg/g) : null;
       if (match) {
         match.forEach(url => {
           const img = document.createElement("img");
@@ -129,6 +161,16 @@
       }
 
       chatBox.appendChild(messageDiv);
+      // If followup is provided, show it below bot reply
+      if (followup) {
+        const followDiv = document.createElement("div");
+        followDiv.className = "followup";
+        followDiv.style.color = "#7fd957";
+        followDiv.style.marginLeft = "2em";
+        followDiv.style.fontStyle = "italic";
+        followDiv.innerHTML = `<span>💡 Follow-up: ${followup}</span>`;
+        chatBox.appendChild(followDiv);
+      }
       chatBox.scrollTop = chatBox.scrollHeight;
     }
 

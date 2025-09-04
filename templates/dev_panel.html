@@ -92,7 +92,12 @@
             </table>
         </div>
         <div class="section">
-            <a href="/dev/code_assistant"><button style="background:#222;color:#7fd957;padding:0.7em 1.5em;border-radius:8px;font-size:1.1em;">Coding Assistant</button></a>
+            <h2>Live Chat Console</h2>
+            <div id="live-console" style="background:#111;padding:1em;border-radius:8px;max-height:300px;overflow-y:auto;font-family:monospace;"></div>
+            <button onclick="refreshConsole()">Refresh Console</button>
+        </div>
+        <div class="section">
+            <a href="/dev/code-assistant"><button style="background:#222;color:#7fd957;padding:0.7em 1.5em;border-radius:8px;font-size:1.1em;">Coding Assistant</button></a>
         </div>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -147,6 +152,21 @@ Object.entries(userQuestions).forEach(([user, questions]) => {
     tbody.appendChild(tr);
   });
 });
+    </script>
+    <script>
+    async function refreshConsole() {
+      const res = await fetch('/api/chats');
+      const chats = await res.json();
+      const consoleDiv = document.getElementById('live-console');
+      consoleDiv.innerHTML = '';
+      chats.forEach(chat => {
+        // Show both user and bot messages (if available)
+        consoleDiv.innerHTML += `<div><strong>User:</strong> ${chat.title}<br><strong>Bot:</strong> ${chat.timestamp}</div><hr>`;
+      });
+    }
+    // Auto-refresh every 10 seconds
+    setInterval(refreshConsole, 10000);
+    refreshConsole();
     </script>
 </body>
 </html>

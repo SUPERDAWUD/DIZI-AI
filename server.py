@@ -1,6 +1,3 @@
-
-
- 
 from flask import Flask, render_template, request, jsonify, send_from_directory, session, redirect, url_for
 from werkzeug.utils import secure_filename
 import os
@@ -9,6 +6,7 @@ from utils import start_generator_api
 from functools import wraps
 import json
 from dotenv import load_dotenv
+import time
 
 load_dotenv()
 
@@ -200,6 +198,42 @@ def code_assistant_write():
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'error': str(e)})
+
+@app.route('/api/save_chat', methods=['POST'])
+def api_save_chat():
+    data = request.get_json()
+    username = data.get('user')
+    chat = data.get('chat')
+    if not username or not chat:
+        return jsonify({'success': False, 'error': 'Missing user or chat.'})
+    # Save chat per user
+    chat_file = os.path.join('user_chats', f'{username}.json')
+    os.makedirs('user_chats', exist_ok=True)
+    try:
+        if os.path.exists(chat_file):
+            with open(chat_file, 'r', encoding='utf-8') as f:
+                history = json.load(f)
+        else:
+            history = []
+        history.append({'chat': chat, 'timestamp': time.time()})
+        with open(chat_file, 'w', encoding='utf-8') as f:
+            json.dump(history, f, indent=2)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/load_chat', methods=['POST'])
+def api_load_chat():
+    data = request.get_json()
+    username = data.get('user')
+    if not username:
+        return jsonify({'success': False, 'error': 'Missing user.'})
+    chat_file = os.path.join('user_chats', f'{username}.json')
+    if not os.path.exists(chat_file):
+        return jsonify({'success': False, 'error': 'No chat found.'})
+    with open(chat_file, 'r', encoding='utf-8') as f:
+        history = json.load(f)
+    return jsonify({'success': True, 'history': history})
 
 if __name__ == "__main__":
     start_generator_api()

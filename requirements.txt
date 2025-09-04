@@ -1,3 +1,4 @@
+streamlit
 flask
 gtts
 nltk
@@ -16,7 +17,6 @@ requests
 scikit-learn
 sentence-transformers
 serpapi==0.1.5
-streamlit
 sympy
 tabula-py
 text2emotion

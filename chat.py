@@ -1416,7 +1416,15 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
     msg_norm = normalize_grammar(msg_corrected)
     intent_reply = get_intent_response(msg_corrected)
     if intent_reply:
-        return intent_reply
+        # Always generate follow-up for instant intent
+        followup = None
+        try:
+            followup_resp = requests.post("http://localhost:5050/generate/followup", json={"topic": msg_corrected})
+            if followup_resp.ok:
+                followup = followup_resp.json().get("followup", None)
+        except Exception:
+            pass
+        return {"type": "intent", "content": intent_reply, "followup": followup}
     # --- Model/Personality selection per user ---
     import flask
     model = flask.session.get('model')
@@ -1439,6 +1447,23 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
     personality = personality or 'friendly'
     # Set model/personality for local_gpt
     local_gpt.set_model(model, personality)
+    # --- Custom Model Integration ---
+    use_custom = (model == 'custom' or model == 'custom_llm')
+    context = {
+        'gemini_key': os.getenv('GEMINI_API_KEY'),
+        'serpapi_key': os.getenv('SERPAPI_KEY'),
+        'model': custom_model
+    }
+    if use_custom:
+        # Use custom model for everything good
+        result = custom_everything_good(msg_norm, context)
+        # Compose sources for unified handling
+        sources.append(('custom_text', result.get('text')))
+        sources.append(('custom_code', result.get('code')))
+        sources.append(('custom_speech', result.get('speech')))
+        sources.append(('custom_probability', result.get('probability')))
+        if result.get('google'):
+            sources.append(('custom_google', result.get('google')))
     # 0.1. Data Prediction (user can ask: predict [data])
     if msg_norm.lower().startswith('predict '):
         try:
@@ -1593,21 +1618,61 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
             pass
     # --- Synthesize best answer ---
     priority = ['math', 'code', 'speech', 'intent', 'kb', 'file', 'files', 'memory', 'llm', 'tool', 'google', 'wikipedia', 'image', 'time', 'location']
+    # Synthesize best answer and always generate enhanced text for each sentence
+    best_type = None
+    best_content = None
+    best_lang = None
     for p in priority:
         for src, val in sources:
             if src == p and val:
-                if username and personality:
-                    if src == 'code' and isinstance(val, dict):
-                        return {'type': 'code', 'content': val['content'], 'language': val['language'], 'personality': personality}
-                    val = adapt_response_style(val, personality)
-                return val
-    # Fallback: concatenate all sources
-    if sources:
-        result = '\n\n'.join([f"[{src}] {val}" for src, val in sources if val])
-        if username and personality:
-            result = adapt_response_style(result, personality)
-        return result
-    return "Sorry, I didn't understand. Please try again with a clearer question or request."
+                best_type = src
+                if src == 'code' and isinstance(val, dict):
+                    best_content = val['content']
+                    best_lang = val['language']
+                else:
+                    best_content = val
+                break
+        if best_content:
+            break
+    if not best_content and sources:
+        best_type = 'multi'
+        best_content = '\n\n'.join([f"[{src}] {val}" for src, val in sources if val])
+    if username and personality and best_content:
+        best_content = adapt_response_style(best_content, personality)
+    # Always generate follow-up and enhanced text for each sentence
+    followup = None
+    enhanced_sentences = []
+    try:
+        # Split best_content into sentences and enhance each with LLM
+        import re
+        sentences = re.split(r'(?<=[.!?])\s+', str(best_content))
+        for sent in sentences:
+            if sent.strip():
+                enhanced = free_llm_generate(f"Enhance this sentence for clarity, creativity, and helpfulness: {sent}", task='text')
+                enhanced_sentences.append(enhanced)
+        enhanced_text = '\n'.join(enhanced_sentences)
+    except Exception:
+        enhanced_text = best_content
+    try:
+        followup_resp = requests.post("http://localhost:5050/generate/followup", json={"topic": msg_corrected})
+        if followup_resp.ok:
+            raw_followup = followup_resp.json().get("followup", None)
+            # Filter out irrelevant/generic follow-ups (e.g., Disqus comments)
+            if raw_followup and isinstance(raw_followup, str):
+                if ("Disqus" in raw_followup or "enable JavaScript" in raw_followup or "Comments" in raw_followup):
+                    followup = None
+                elif len(raw_followup.strip()) < 5:
+                    followup = None
+                else:
+                    followup = raw_followup
+    except Exception:
+        pass
+    if best_type == 'code':
+        return {"type": "code", "content": enhanced_text, "language": best_lang, "followup": followup, "personality": personality}
+    elif best_type:
+        return {"type": best_type, "content": enhanced_text, "followup": followup, "personality": personality}
+    else:
+        return {"type": "none", "content": "Sorry, I didn't understand. Please try again with a clearer question or request.", "followup": followup}
 
 # --- Response Style Adapter ---
 def adapt_response_style(response, personality):
@@ -1958,46 +2023,14 @@ def api_image_understand():
     except Exception as e:
         return jsonify({'error': str(e)})
 
-def generate_code_text(prompt, language='en'):
-    """Generate code using free_llm_generate."""
-    return free_llm_generate(prompt, task='code', language=language)
+from custom_model.custom_llm import (
+    load_custom_llm, generate_text as custom_generate_text,
+    generate_code as custom_generate_code,
+    generate_speech as custom_generate_speech,
+    estimate_probability as custom_estimate_probability,
+    everything_good as custom_everything_good
+)
 
-def generate_speech_text(topic, tone, audience, length):
-    """Generate speech using free_llm_generate."""
-    prompt = f"Write a {length} speech about {topic} for {audience} in a {tone} tone."
-    return free_llm_generate(prompt, task='speech')
-
-def generate_image_text(prompt):
-    """Generate image using free_llm_generate."""
-    return free_llm_generate(prompt, task='image')
-
-def generate_video_text(prompt):
-    """Generate video using free_llm_generate."""
-    return free_llm_generate(prompt, task='video')
-
-def generate_audio_text(prompt):
-    """Generate audio/dialogue using free_llm_generate."""
-    return free_llm_generate(prompt, task='audio')
-
-def generate_embedding_text(prompt):
-    """Generate embedding using free_llm_generate."""
-    return free_llm_generate(prompt, task='embedding')
-
-# Example usage:
-if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "cli":
-        print("DIZI AI Chatbot CLI Mode\nType 'exit' to quit.")
-        username = input("Enter your username: ").strip() or "cli_user"
-        while True:
-            msg = input("You: ")
-            if msg.lower() in ("exit", "quit"): 
-                print("Goodbye!")
-                break
-            reply = get_response(msg, username=username)
-            print(f"AI: {reply}")
-    # Add a CLI option to list Gemini models
-    elif len(sys.argv) > 1 and sys.argv[1] == "list_gemini_models":
-        result = get_gemini_models()
-        print(result)
-    else:
-        app.run(debug=True)
+# Load custom model (example, can be improved for device/model selection)
+CUSTOM_MODEL_PATH = os.path.join('custom_model', 'custom_llm_weights.pth')
+custom_model = load_custom_llm(CUSTOM_MODEL_PATH, device='cpu')
