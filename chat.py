@@ -1443,26 +1443,8 @@ def analyze_user_personality(username, msg):
 
 # --- Enhanced get_response: synthesize from all sources and adapt personality ---
 def get_response(msg, username=None, file_context=None, all_files=False, feedback=None):
-    # --- Intent check FIRST for instant response ---
     msg_corrected = correct_sentence(msg)
     msg_norm = normalize_grammar(msg_corrected)
-    intent_reply = get_intent_response(msg_corrected)
-    if intent_reply:
-        followup = None
-        low = msg_corrected.strip().lower()
-        if (low not in GREETING_WORDS and
-                low not in AFFIRMATIVE_WORDS and
-                low not in NEGATIVE_WORDS):
-            try:
-                followup_resp = requests.post(
-                    "http://localhost:5050/generate/followup",
-                    json={"topic": msg_corrected},
-                )
-                if followup_resp.ok:
-                    followup = followup_resp.json().get("followup", None)
-            except Exception:
-                pass
-        return {"type": "intent", "content": intent_reply, "followup": followup}
     # --- Model/Personality selection per user ---
     import flask
     model = flask.session.get('model')
@@ -1585,16 +1567,8 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
                 sources.append(('speech', "Speech generation unavailable."))
     # 7. Intent/KB
     intent_reply = get_intent_response(msg_corrected)
-    # Only return intent immediately for greeting, goodbye, thanks, feeling, funny, creator, capabilities
     if intent_reply:
-        greeting_tags = ["greeting", "goodbye", "thanks", "feeling", "funny", "creator", "capabilities"]
-        tag = None
-        for intent in intents["intents"]:
-            if intent_reply.strip().replace("[AI says]","").replace("🤖","").replace("✨","").startswith(tuple(intent["responses"])):
-                tag = intent["tag"]
-                break
-        if tag in greeting_tags:
-            return intent_reply
+        sources.append(('intent', intent_reply))
     kb_reply = get_from_knowledge_base(msg_corrected)
     if kb_reply:
         sources.append(('kb', kb_reply))
@@ -1655,7 +1629,7 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
         except Exception:
             pass
     # --- Synthesize best answer ---
-    priority = ['math', 'code', 'speech', 'intent', 'kb', 'file', 'files', 'memory', 'llm', 'tool', 'google', 'wikipedia', 'image', 'time', 'location']
+    priority = ['math', 'code', 'speech', 'gemini', 'gpt_rag', 'memory', 'llm', 'intent', 'kb', 'file', 'files', 'tool', 'google', 'wikipedia', 'image', 'time', 'location']
     # Synthesize best answer and always generate enhanced text for each sentence
     best_type = None
     best_content = None
