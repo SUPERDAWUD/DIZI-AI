@@ -1,17 +1,21 @@
 import torch
 import torch.nn as nn
 
+
 class CustomModel(nn.Module):
-    def __init__(self, input_dim=768, hidden_dim=1024, output_dim=768):
+    """Simple feed-forward network with dropout for better generalization."""
+
+    def __init__(self, input_dim: int = 768, hidden_dim: int = 1024, output_dim: int = 768, dropout: float = 0.1):
         super().__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_dim, output_dim)
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
-        return x
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
 # Example loader
 

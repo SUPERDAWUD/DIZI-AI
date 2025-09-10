@@ -1,28 +1,59 @@
 import os
+import json
+from typing import List, Tuple
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import json
+
+from PIL import Image
+import pytesseract
+
 from model import CustomModel
 
-def load_training_data(data_dir='user_chats'):
-    data = []
+def load_training_data(data_dir: str = "user_chats") -> List[Tuple[str, str]]:
+    """Load training pairs from JSON chats, code files, or images.
+
+    If the directory does not exist, it is created and a FileNotFoundError is
+    raised to prompt the user to add data.
+    """
+    if not os.path.isdir(data_dir):
+        os.makedirs(data_dir, exist_ok=True)
+        print(
+            f"[load_training_data] Created missing directory '{data_dir}'. "
+            "Add training files and rerun training."
+        )
+        return []
+
+    data: List[Tuple[str, str]] = []
     for fname in os.listdir(data_dir):
-        if fname.endswith('.json'):
-            with open(os.path.join(data_dir, fname), 'r', encoding='utf-8') as f:
+        fpath = os.path.join(data_dir, fname)
+        if fname.endswith(".json"):
+            with open(fpath, "r", encoding="utf-8") as f:
                 chats = json.load(f)
             for chat_entry in chats:
-                for msg in chat_entry['chat']:
-                    # Example: use user message as input, bot message as target
-                    if msg['user'] != 'DIZI':
-                        input_text = msg['message']
+                for msg in chat_entry.get("chat", []):
+                    if msg["user"] != "DIZI":
+                        input_text = msg["message"]
                     else:
-                        target_text = msg['message']
+                        target_text = msg["message"]
                         data.append((input_text, target_text))
+        elif fname.endswith(".py"):
+            with open(fpath, "r", encoding="utf-8") as f:
+                code = f.read()
+            data.append((code, code))
+        elif fname.lower().endswith((".png", ".jpg", ".jpeg")):
+            try:
+                image = Image.open(fpath)
+                text = pytesseract.image_to_string(image)
+                if text.strip():
+                    data.append((text, text))
+            except Exception as e:
+                print(f"[load_training_data] Failed to process image {fname}: {e}")
     return data
 
-def text_to_tensor(text, vocab, max_len=32):
-    # Simple encoding: map chars to indices, pad/truncate
+def text_to_tensor(text, vocab, max_len: int = 32):
+    """Encode text to a fixed-size tensor using a simple char-index mapping."""
     indices = [vocab.get(c, 0) for c in text[:max_len]]
     indices += [0] * (max_len - len(indices))
     return torch.tensor(indices, dtype=torch.float32)
