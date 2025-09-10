@@ -1,4 +1,9 @@
 import pickle
+import warnings
+from sklearn.exceptions import InconsistentVersionWarning
+
+# Silence scikit-learn model version mismatch warnings
+warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
 # --- Load scikit-learn intent classifier ---
 try:
     with open('intent_classifier.pkl', 'rb') as f:
@@ -41,7 +46,10 @@ import re
 import threading
 from sympy import symbols, Eq, solve, simplify, expand, factor, diff, integrate
 from dotenv import load_dotenv
-from serpapi import GoogleSearch
+try:
+    from serpapi import GoogleSearch
+except ImportError:  # serpapi package not installed
+    GoogleSearch = None
 from chatbot_model import NeuralNet
 from utils import bag_of_words, tokenize, start_generator_api
 import pytz
@@ -86,9 +94,31 @@ UPLOADS_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
 load_dotenv()
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
+# --- SerpAPI helper ---
+def serpapi_search(params):
+    """Search SerpAPI using the official client if available, otherwise via HTTP."""
+    params = dict(params)
+    if GoogleSearch is not None:
+        return GoogleSearch(params).get_dict()
+    if 'api_key' not in params:
+        raise ValueError("SerpAPI 'api_key' is required")
+    resp = requests.get("https://serpapi.com/search", params=params, timeout=5)
+    resp.raise_for_status()
+    return resp.json()
+
 # Load intents
 with open("data/intents.json", "r", encoding="utf-8") as f:
     intents = json.load(f)
+
+# Predefined word sets for lightweight intent handling
+GREETING_WORDS = {w.lower() for w in [
+    "hello", "hi", "hey", "what's up", "yo", "good day", "greetings",
+    "hiya", "sup", "howdy", "hey there"]}
+AFFIRMATIVE_WORDS = {w.lower() for w in [
+    "yes", "yeah", "yup", "yep", "sure", "affirmative", "definitely",
+    "absolutely", "of course"]}
+NEGATIVE_WORDS = {w.lower() for w in [
+    "no", "nope", "nah", "not really", "no thanks"]}
 
 # Load knowledge base
 with open("data/knowledge_base.json", "r", encoding="utf-8") as f:
@@ -305,13 +335,11 @@ def get_weather(location):
     if not api_key or not city:
         return "Weather API key or city missing."
     try:
-        from serpapi import GoogleSearch
-        search = GoogleSearch({
+        results = serpapi_search({
             "q": f"weather in {city} {country}",
             "api_key": api_key,
-            "engine": "google"
+            "engine": "google",
         })
-        results = search.get_dict()
         answer_box = results.get("answer_box", {})
         if "temperature" in answer_box:
             return f"Weather in {city}: {answer_box['temperature']} {answer_box.get('unit', '')}, {answer_box.get('description', '')}"
@@ -348,6 +376,11 @@ def semantic_similarity(query, choices):
 
 # Improved intent response engine (fuzzy + semantic)
 def get_intent_response(msg):
+    low = msg.strip().lower()
+    if low in AFFIRMATIVE_WORDS:
+        return "Great! Let's dive deeper—what would you like to explore next?"
+    if low in NEGATIVE_WORDS:
+        return "No worries! Let me know if there's something else you'd like to discuss."
     # Use scikit-learn classifier if available
     if intent_clf and intent_vectorizer:
         X = intent_vectorizer.transform([msg])
@@ -587,12 +620,11 @@ def ask_google(query):
     if not SERPAPI_KEY:
         return "Google API key is missing."
     try:
-        search = GoogleSearch({
+        results = serpapi_search({
             "q": query,
             "api_key": SERPAPI_KEY,
-            "engine": "google"
+            "engine": "google",
         })
-        results = search.get_dict()
         answer_box = results.get("answer_box", {})
         snippet = results.get("organic_results", [{}])[0].get("snippet", "")
         followup = None
@@ -1416,14 +1448,20 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
     msg_norm = normalize_grammar(msg_corrected)
     intent_reply = get_intent_response(msg_corrected)
     if intent_reply:
-        # Always generate follow-up for instant intent
         followup = None
-        try:
-            followup_resp = requests.post("http://localhost:5050/generate/followup", json={"topic": msg_corrected})
-            if followup_resp.ok:
-                followup = followup_resp.json().get("followup", None)
-        except Exception:
-            pass
+        low = msg_corrected.strip().lower()
+        if (low not in GREETING_WORDS and
+                low not in AFFIRMATIVE_WORDS and
+                low not in NEGATIVE_WORDS):
+            try:
+                followup_resp = requests.post(
+                    "http://localhost:5050/generate/followup",
+                    json={"topic": msg_corrected},
+                )
+                if followup_resp.ok:
+                    followup = followup_resp.json().get("followup", None)
+            except Exception:
+                pass
         return {"type": "intent", "content": intent_reply, "followup": followup}
     # --- Model/Personality selection per user ---
     import flask
@@ -2033,4 +2071,4 @@ from custom_model.custom_llm import (
 
 # Load custom model (example, can be improved for device/model selection)
 CUSTOM_MODEL_PATH = os.path.join('custom_model', 'custom_llm_weights.pth')
-custom_model = load_custom_llm(CUSTOM_MODEL_PATH, device='cpu')
+custom_model = load_custom_llm(CUSTOM_MODEL_PATH, device='auto')

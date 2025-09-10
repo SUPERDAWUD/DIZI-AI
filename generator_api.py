@@ -90,8 +90,12 @@ def generate_speech():
 
 @app.route("/generate/followup", methods=["POST"])
 def generate_followup():
-    # Use last topic from session
-    topic = session.get(FOLLOWUP_KEY, "the previous topic")
+    data = request.get_json(silent=True) or {}
+    topic = data.get("topic") or session.get(FOLLOWUP_KEY)
+    if topic:
+        session[FOLLOWUP_KEY] = topic
+    else:
+        topic = "the previous topic"
     text_gen = get_text_gen()
     if text_gen:
         prompt = f"Write a follow-up question or comment for a speech about {topic}:\n"

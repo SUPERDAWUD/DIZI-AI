@@ -58,6 +58,16 @@
       "tag": "insult",
       "patterns": ["you're dumb", "you're stupid", "bad bot", "you suck", "not helpful"],
       "responses": ["Ouch! I'll try to do better.", "Sorry! I’m still learning.", "That stings, but I’ll keep improving.", "Let’s turn that frown upside down!"]
+    },
+    {
+      "tag": "affirmation",
+      "patterns": ["yes", "yeah", "yup", "yep", "sure", "affirmative", "definitely", "absolutely", "of course"],
+      "responses": ["Great! Let's dive deeper—what would you like to explore next?"]
+    },
+    {
+      "tag": "negation",
+      "patterns": ["no", "nope", "nah", "not really", "no thanks"],
+      "responses": ["No worries! Let me know if there's something else you'd like."]
     }
   ]
 }

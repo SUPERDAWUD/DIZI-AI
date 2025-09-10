@@ -6,6 +6,10 @@ import os
 import json
 import time
 from dotenv import load_dotenv
+try:
+    from serpapi import GoogleSearch
+except ImportError:
+    GoogleSearch = None
 
 load_dotenv()
 SERPAPI_KEY = os.getenv('SERPAPI_KEY')
@@ -26,12 +30,16 @@ class CustomLLM(nn.Module):
 
 # Loader for model weights
 
-def load_custom_llm(weights_path=None, device='cpu'):
-    # Auto-select device: GPU if available, else CPU
-    auto_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+def load_custom_llm(weights_path=None, device='auto'):
+    """Load CustomLLM weights if available, otherwise fall back to random init."""
+    auto_device = device if device != 'auto' else ('cuda' if torch.cuda.is_available() else 'cpu')
     model = CustomLLM()
     if weights_path and os.path.exists(weights_path):
-        model.load_state_dict(torch.load(weights_path, map_location=auto_device))
+        try:
+            state = torch.load(weights_path, map_location=auto_device)
+            model.load_state_dict(state, strict=False)
+        except Exception as e:
+            print(f"[CustomLLM] Failed to load weights from {weights_path}: {e}. Using random weights.")
     else:
         print(f"[CustomLLM] No weights found at {weights_path}, using random weights.")
     model.to(auto_device)
@@ -41,15 +49,22 @@ def load_custom_llm(weights_path=None, device='cpu'):
 # --- Google Search Integration ---
 
 def google_search(query, serpapi_key):
-    from serpapi import GoogleSearch
-    search = GoogleSearch({"q": query, "api_key": serpapi_key, "engine": "google"})
-    results = search.get_dict()
-    answer_box = results.get("answer_box", {})
-    snippet = results.get("organic_results", [{}])[0].get("snippet", "")
-    if "answer" in answer_box:
-        return str(answer_box["answer"])
-    elif snippet:
-        return snippet
+    params = {"q": query, "api_key": serpapi_key, "engine": "google"}
+    try:
+        if GoogleSearch is not None:
+            results = GoogleSearch(params).get_dict()
+        else:
+            resp = requests.get("https://serpapi.com/search", params=params, timeout=5)
+            resp.raise_for_status()
+            results = resp.json()
+        answer_box = results.get("answer_box", {})
+        snippet = results.get("organic_results", [{}])[0].get("snippet", "")
+        if "answer" in answer_box:
+            return str(answer_box["answer"])
+        elif snippet:
+            return snippet
+    except Exception:
+        return None
     return None
 
 # --- Gemini Integration ---
