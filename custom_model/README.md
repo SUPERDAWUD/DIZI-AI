@@ -5,7 +5,9 @@ This folder contains your custom AI model for DIZI.
 ## Files
 - `model.py`: PyTorch model definition, loader, and inference function.
 - `__init__.py`: Package init.
-- Add training scripts, weights, and utilities here.
+- `train_custom_llm.py`: Sample training script that accepts chat logs,
+  code snippets, or images in `user_chats/` and creates the folder if missing.
+- Add additional training utilities and weights here.
 
 ## Integration
 - Import and use `CustomModel` in your main backend (e.g., `chat.py`).

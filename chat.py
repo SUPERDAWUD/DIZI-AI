@@ -1,4 +1,9 @@
 import pickle
+import warnings
+from sklearn.exceptions import InconsistentVersionWarning
+
+# Silence scikit-learn model version mismatch warnings
+warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
 # --- Load scikit-learn intent classifier ---
 try:
     with open('intent_classifier.pkl', 'rb') as f:
@@ -41,7 +46,10 @@ import re
 import threading
 from sympy import symbols, Eq, solve, simplify, expand, factor, diff, integrate
 from dotenv import load_dotenv
-from serpapi import GoogleSearch
+try:
+    from serpapi import GoogleSearch
+except ImportError:  # serpapi package not installed
+    GoogleSearch = None
 from chatbot_model import NeuralNet
 from utils import bag_of_words, tokenize, start_generator_api
 import pytz
@@ -85,6 +93,18 @@ UPLOADS_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
 # Load keys
 load_dotenv()
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+
+# --- SerpAPI helper ---
+def serpapi_search(params):
+    """Search SerpAPI using the official client if available, otherwise via HTTP."""
+    params = dict(params)
+    if GoogleSearch is not None:
+        return GoogleSearch(params).get_dict()
+    if 'api_key' not in params:
+        raise ValueError("SerpAPI 'api_key' is required")
+    resp = requests.get("https://serpapi.com/search", params=params, timeout=5)
+    resp.raise_for_status()
+    return resp.json()
 
 # Load intents
 with open("data/intents.json", "r", encoding="utf-8") as f:
@@ -305,13 +325,11 @@ def get_weather(location):
     if not api_key or not city:
         return "Weather API key or city missing."
     try:
-        from serpapi import GoogleSearch
-        search = GoogleSearch({
+        results = serpapi_search({
             "q": f"weather in {city} {country}",
             "api_key": api_key,
-            "engine": "google"
+            "engine": "google",
         })
-        results = search.get_dict()
         answer_box = results.get("answer_box", {})
         if "temperature" in answer_box:
             return f"Weather in {city}: {answer_box['temperature']} {answer_box.get('unit', '')}, {answer_box.get('description', '')}"
@@ -587,12 +605,11 @@ def ask_google(query):
     if not SERPAPI_KEY:
         return "Google API key is missing."
     try:
-        search = GoogleSearch({
+        results = serpapi_search({
             "q": query,
             "api_key": SERPAPI_KEY,
-            "engine": "google"
+            "engine": "google",
         })
-        results = search.get_dict()
         answer_box = results.get("answer_box", {})
         snippet = results.get("organic_results", [{}])[0].get("snippet", "")
         followup = None

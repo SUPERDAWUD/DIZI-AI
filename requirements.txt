@@ -14,9 +14,9 @@ pytesseract
 pytz
 replicate
 requests
-scikit-learn
+scikit-learn==1.7.0
 sentence-transformers
-serpapi==0.1.5
+google-search-results
 sympy
 tabula-py
 text2emotion
@@ -24,3 +24,9 @@ textblob
 torch
 transformers
 werkzeug==2.0.3
+wikipedia
+google-generativeai
+accelerate
+bitsandbytes
+huggingface-hub[hf_xet]
+hf_transfer

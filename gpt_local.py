@@ -18,38 +18,41 @@ class LocalGPT:
         self.personality = personality
         self.bias_prompt = bias_prompt
         self.device = self._resolve_device(device)
-        if MODEL_REGISTRY[model_name].startswith('tiiuae/falcon'):
-            self.tokenizer = AutoTokenizer.from_pretrained(MODEL_REGISTRY[model_name])
-            self.model = AutoModelForCausalLM.from_pretrained(
-                MODEL_REGISTRY[model_name],
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device_map="cuda" if torch.cuda.is_available() else "cpu"
-            )
-        else:
-            self.tokenizer = AutoTokenizer.from_pretrained(MODEL_REGISTRY[model_name])
-            self.model = AutoModelForCausalLM.from_pretrained(MODEL_REGISTRY[model_name]).to(self.device)
-        self.model.eval()
+        self.model = None
+        self.tokenizer = None
+        self._try_load_model(MODEL_REGISTRY[model_name])
+
+    def _try_load_model(self, repo_id):
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(repo_id)
+            load_kwargs = {
+                "device_map": "auto",
+                "low_cpu_mem_usage": True,
+                "dtype": torch.float16 if torch.cuda.is_available() else torch.float32,
+            }
+            if torch.cuda.is_available():
+                try:
+                    import bitsandbytes  # noqa: F401
+                    load_kwargs["load_in_8bit"] = True
+                except Exception:
+                    pass
+            self.model = AutoModelForCausalLM.from_pretrained(repo_id, **load_kwargs)
+            self.model.eval()
+        except Exception as e:
+            # Fallback to echo mode if downloading fails
+            print(f"[LocalGPT] Warning: failed to load '{repo_id}': {e}. Using fallback.")
 
     def set_model(self, model_name, personality='friendly', bias_prompt=None):
         if model_name != self.model_key:
-            if MODEL_REGISTRY[model_name].startswith('tiiuae/falcon'):
-                self.tokenizer = AutoTokenizer.from_pretrained(MODEL_REGISTRY[model_name])
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    MODEL_REGISTRY[model_name],
-                    torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                    device_map="cuda" if torch.cuda.is_available() else "cpu"
-                )
-            else:
-                self.tokenizer = AutoTokenizer.from_pretrained(MODEL_REGISTRY[model_name])
-                self.model = AutoModelForCausalLM.from_pretrained(MODEL_REGISTRY[model_name]).to(self.device)
-            self.model.eval()
+            self._try_load_model(MODEL_REGISTRY[model_name])
             self.model_key = model_name
         self.personality = personality
         self.bias_prompt = bias_prompt
 
     def set_device(self, device):
         self.device = self._resolve_device(device)
-        self.model.to(self.device)
+        if self.model is not None:
+            self.model.to(self.device)
 
     def _resolve_device(self, device):
         if device == 'auto':
@@ -68,6 +71,8 @@ class LocalGPT:
         if self.bias_prompt:
             full_prompt += f"{self.bias_prompt}\n"
         full_prompt += prompt
+        if self.model is None or self.tokenizer is None:
+            return full_prompt  # Fallback echo
         inputs = self.tokenizer.encode(full_prompt, return_tensors='pt').to(self.device)
         with torch.no_grad():
             outputs = self.model.generate(inputs, max_length=max_length, pad_token_id=self.tokenizer.eos_token_id)
