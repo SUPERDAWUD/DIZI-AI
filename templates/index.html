@@ -23,8 +23,9 @@
     <div id="bot-loader">
       <span class="loader"></span><span> DIZI is thinking...</span>
     </div>
-    <div class="input-area">
+        <div class="input-area">
       <input type="text" id="user-input" placeholder="Type your message..." />
+      <label style="margin-left:8px;color:#7fd957;"><input type="checkbox" id="stream-toggle" checked/> Stream</label>
       <button onclick="sendMessage()">Send</button>
     </div>
     <!-- File upload section -->
@@ -35,8 +36,11 @@
             <span id="file-name"></span>
             <button type="submit">Add</button>
         </form>
-    </div>
-    <!-- Dev Mode button -->
+        <!-- Quick Web Summarization -->
+    <div class="file-upload-section" style="margin-top:0.5em;">
+      <input type="text" id="quick-url" placeholder="Paste a URL to summarize (optional)" style="width:70%"/>
+      <button type="button" onclick="quickSummarize()">Summarize URL</button>
+    </div></div><!-- Dev Mode button -->
     <div class="dev-mode-section" style="margin-top:1em; text-align:right;">
         <a href="/dev"><button id="dev-mode-btn" style="background:#222;color:#fff;padding:0.5em 1em;border-radius:5px;">Dev Mode</button></a>
     </div>
@@ -74,7 +78,10 @@
   </div>
   <div style="margin-left:250px;">
     <!-- Main chat UI goes here -->
-  </div>
+      <div style="margin-top:1em;color:#7fd957;">
+        <label><input type="checkbox" id="toggle-web"/> Auto Web Summarize</label><br/>
+        <label><input type="checkbox" id="toggle-rag"/> Use Vector RAG</label>
+      </div>  </div>
 
   <!-- Comments Section (Disqus) -->
   <!-- Removed Disqus. Add alternative below if needed. -->
@@ -107,7 +114,7 @@
       const res = await fetch("/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user: USER, message: msg })
+        body: JSON.stringify({ user: USER, message: msg, web: document.getElementById('toggle-web')?.checked, rag: document.getElementById('toggle-rag')?.checked })
       });
 
       const data = await res.json();
@@ -193,6 +200,80 @@
         // ...
     }
     loadChats();
-    </script>
-</body>
+    async function quickSummarize(){
+  const url = document.getElementById('quick-url').value.trim();
+  if(!url) return;
+  const res = await fetch('/api/web-summarize', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url})});
+  const data = await res.json();
+  const sum = (data.result && data.result.summary) ? data.result.summary : (data.summary || JSON.stringify(data));
+  appendMessage('DIZI', 'Summary:\n' + sum + (data.result && data.result.url ? ('\nSource: ' + data.result.url) : ''));
+}\nasync function sendMessage() {
+  const input = document.getElementById('user-input');
+  const msg = input.value.trim();
+  if (!msg || !USER) return;
+  appendMessage('You', msg);
+  chatHistory.push({ user: USER, message: msg });
+  input.value = '';
+  document.getElementById('bot-loader').style.display = 'block';
+  const streaming = document.getElementById('stream-toggle')?.checked;
+  if (streaming) {
+    await sendMessageStream(msg);
+    document.getElementById('bot-loader').style.display = 'none';
+    return;
+  }
+  const res = await fetch('/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user: USER, message: msg, web: document.getElementById('toggle-web')?.checked, rag: document.getElementById('toggle-rag')?.checked })});
+  const data = await res.json();
+  document.getElementById('bot-loader').style.display = 'none';
+  let botContent = data.response;
+  let followup = null;
+  if (typeof botContent === 'object' && botContent !== null) {
+    botContent = botContent.content || '';
+    followup = data.response.followup || null;
+    if (data.response.type === 'code' && data.response.content) {
+      botContent = <pre><code></code></pre>;
+    }
+  }
+  appendMessage('DIZI', botContent, followup);
+  chatHistory.push({ user: 'DIZI', message: botContent });
+}
+
+async function sendMessageStream(msg) {
+  const res = await fetch('/chat/stream', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ user: USER, message: msg, web: document.getElementById('toggle-web')?.checked, rag: document.getElementById('toggle-rag')?.checked })});
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let acc = '';
+  let meta = null;
+  let content = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value, { stream: true });
+    acc += chunk;
+    const parts = acc.split('\n\n');
+    acc = parts.pop();
+    for (const p of parts) {
+      if (p.startsWith('data: ')) {
+        const json = p.slice(6);
+        try {
+          const obj = JSON.parse(json);
+          if (obj.meta) meta = obj.meta;
+          if (obj.delta) {
+            content += obj.delta;
+          }
+          if (obj.done) {
+            const follow = meta && meta.followup ? meta.followup : null;
+            appendMessage('DIZI', content, follow);
+            chatHistory.push({ user: 'DIZI', message: content });
+          }
+        } catch (e) {}
+      }
+    }
+  }
+}\n</script></body>
 </html>
+
+
+
+
+
+

@@ -1,3 +1,4 @@
+import os
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -33,7 +34,11 @@ class LocalGPT:
             if torch.cuda.is_available():
                 try:
                     import bitsandbytes  # noqa: F401
-                    load_kwargs["load_in_8bit"] = True
+                    quant = os.environ.get('QUANTIZATION', '8bit').lower()
+                    if quant == '4bit':
+                        load_kwargs["load_in_4bit"] = True
+                    else:
+                        load_kwargs["load_in_8bit"] = True
                 except Exception:
                     pass
             self.model = AutoModelForCausalLM.from_pretrained(repo_id, **load_kwargs)

@@ -30,3 +30,14 @@ accelerate
 bitsandbytes
 huggingface-hub[hf_xet]
 hf_transfer
+
+beautifulsoup4
+
+wolframalpha
+googletrans==4.0.0-rc1
+beautifulsoup4
+wolframalpha
+googletrans==4.0.0-rc1
+watchdog
+faiss-cpu
+jsonschema

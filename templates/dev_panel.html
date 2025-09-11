@@ -98,9 +98,38 @@
         </div>
         <div class="section">
             <a href="/dev/code-assistant"><button style="background:#222;color:#7fd957;padding:0.7em 1.5em;border-radius:8px;font-size:1.1em;">Coding Assistant</button></a>
-        </div>
+        </div>    <div class="section">
+      <h2>Aggregation & Reasoning</h2>
+      <label for="agg-select">Aggregation mode:</label>
+      <select id="agg-select" onchange="switchAgg()">
+        <option value="parallel">Parallel (synthesize from all)</option>
+        <option value="priority">Priority (pick best source)</option>
+      </select>
+      <br/>
+      <label for="reasoning-select">Reasoning mode:</label>
+      <select id="reasoning-select" onchange="switchReasoning()">
+        <option value="auto">Auto</option>
+        <option value="on">On</option>
+        <option value="off">Off</option>
+      </select>
+      <span id="agg-status" style="margin-left:1em;color:#7fd957;"></span>
     </div>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <div class="section">
+      <h2>Vectors (RAG)</h2>
+      <button onclick="reindexRag()">Rebuild Vector Index</button>
+      <input id="rag-query" placeholder="Query vector index"/>
+      <button onclick="queryRag()">Search</button>
+      <pre id="rag-results" style="max-height:200px;overflow:auto;background:#111;padding:1em;border-radius:6px;"></pre>
+    </div>
+    <div class="section">
+      <h2>Web Summarization</h2>
+      <input id="web-url" placeholder="https://example.com/article"/>
+      <input id="web-question" placeholder="Optional focus question"/>
+      <button onclick="summarizeUrl()">Summarize URL</button>
+      <input id="web-search" placeholder="Search the web"/>
+      <button onclick="searchWeb()">Search + Summarize</button>
+      <pre id="web-output" style="max-height:200px;overflow:auto;background:#111;padding:1em;border-radius:6px;"></pre>
+    </div></div><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
 // --- Personality Pie Chart ---
 const userData = {
@@ -167,6 +196,40 @@ Object.entries(userQuestions).forEach(([user, questions]) => {
     // Auto-refresh every 10 seconds
     setInterval(refreshConsole, 10000);
     refreshConsole();
-    </script>
-</body>
+      async function switchAgg() {
+    const mode = document.getElementById('agg-select').value;
+    const res = await fetch('/api/set-aggregation-mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode}) });
+    const data = await res.json();
+    document.getElementById('agg-status').textContent = 'Aggregation: ' + (data.mode||'unknown');
+  }
+  function switchReasoning() {
+    const mode = document.getElementById('reasoning-select').value;
+    document.getElementById('agg-status').textContent = 'Reasoning (set env REASONING_MODE=' + mode + ')';
+  }
+  async function reindexRag(){
+    const res = await fetch('/api/rag/reindex', {method:'POST'});
+    const data = await res.json();
+    alert('RAG reindex: ' + (data.message || data.ok));
+  }
+  async function queryRag(){
+    const q = document.getElementById('rag-query').value;
+    const res = await fetch('/api/rag/query', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({query:q, top_k:5})});
+    const data = await res.json();
+    document.getElementById('rag-results').textContent = JSON.stringify(data.hits || [], null, 2);
+  }
+  async function summarizeUrl(){
+    const url = document.getElementById('web-url').value;
+    const query = document.getElementById('web-question').value;
+    const res = await fetch('/api/web-summarize', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url, query})});
+    const data = await res.json();
+    document.getElementById('web-output').textContent = JSON.stringify(data.result || data, null, 2);
+  }
+  async function searchWeb(){
+    const query = document.getElementById('web-search').value;
+    const res = await fetch('/api/web-summarize', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({query, num_results:3})});
+    const data = await res.json();
+    document.getElementById('web-output').textContent = JSON.stringify(data.result || data, null, 2);
+  }  </script></body>
 </html>
+
+

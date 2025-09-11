@@ -55,6 +55,7 @@ from utils import bag_of_words, tokenize, start_generator_api
 import pytz
 from datetime import datetime
 from nltk.corpus import words as nltk_words
+from bs4 import BeautifulSoup
 import mimetypes
 import io
 import contextlib
@@ -62,6 +63,7 @@ import tempfile
 import shutil
 from flask import Flask, request, jsonify, render_template, redirect, url_for, session
 from functools import wraps
+from jsonschema import validate, ValidationError
 import sys
 import wikipedia
 import google.generativeai as genai
@@ -89,10 +91,35 @@ def dev_mode_required(f):
 
 # Ensure UPLOADS_DIR is defined at the top for all functions
 UPLOADS_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
+VECTOR_INDEX_DIR = os.path.join(os.path.dirname(__file__), 'vector_index')
+os.makedirs(VECTOR_INDEX_DIR, exist_ok=True)
+_ST_MODEL = None
 
 # Load keys
 load_dotenv()
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+
+# Aggregation mode: 'parallel' (gather/synthesize all) or 'priority' (pick best)
+# Default to 'parallel' to look at everything concurrently and avoid prioritization.
+AGGREGATION_MODE = os.getenv("AGGREGATION_MODE", "parallel").lower()
+REASONING_MODE = os.getenv("REASONING_MODE", "auto").lower()  # off|auto|on
+try:
+    torch.set_float32_matmul_precision('high')
+except Exception:
+    pass
+
+# Expose a simple API to toggle aggregation mode when Flask app context exists
+if 'app' in globals():
+    @app.route('/api/set-aggregation-mode', methods=['POST'])
+    @dev_mode_required
+    def set_aggregation_mode():
+        global AGGREGATION_MODE
+        data = flask_request.get_json(force=True, silent=True) or {}
+        mode = (data.get('mode') or '').lower()
+        if mode not in ('parallel', 'priority'):
+            return jsonify({'ok': False, 'error': 'mode must be parallel or priority'}), 400
+        AGGREGATION_MODE = mode
+        return jsonify({'ok': True, 'mode': AGGREGATION_MODE})
 
 # --- SerpAPI helper ---
 def serpapi_search(params):
@@ -377,7 +404,7 @@ def get_intent_response(msg):
             for intent in intents["intents"]:
                 if best_tag == intent["tag"]:
                     response = random.choice(intent["responses"])
-                    fun_prefixes = ["🤖 ", "✨ ", "[AI says] ", "", "", "", "", "", "", ""]
+                    fun_prefixes = ["[AI] ", ""]
                     return random.choice(fun_prefixes) + response
         # fallback to old logic if not confident
     sentence = tokenize(msg)
@@ -393,7 +420,7 @@ def get_intent_response(msg):
         for intent in intents["intents"]:
             if tag == intent["tag"]:
                 response = random.choice(intent["responses"])
-                fun_prefixes = ["🤖 ", "✨ ", "[AI says] ", "", "", "", "", "", "", ""]
+                fun_prefixes = ["[AI] ", ""]
                 return random.choice(fun_prefixes) + response
     # Fuzzy/semantic fallback
     all_patterns = []
@@ -735,93 +762,104 @@ class TimeoutException(Exception):
 def timeout_handler(signum, frame):
     raise TimeoutException()
 
+
 def handle_math(msg):
-    from sympy import Matrix, Derivative, Integral, limit, summation, Product, Symbol, sin, cos, tan, log, sqrt, pi, E
+    """
+    Evaluate math expressions safely with SymPy and a short timeout.
+    Supports basic arithmetic, derivative/integral/limit, solve, simplify/expand/factor,
+    simple statistics (mean/std/variance), and small matrices.
+    """
+    from sympy import Matrix, Derivative, Integral, limit, summation, Product, Symbol
     x, y, z = symbols("x y z")
     original_msg = msg.strip()
-    msg = original_msg.lower().replace("^", "**")
-    math_prefixes = [
-        "what is ", "whats ", "what's ", "calculate ", "solve ", "compute ", "evaluate ", "find ", "give me ", "tell me ", "can you solve ", "can you calculate ", "can you evaluate ", "can you compute "
-    ]
-    for prefix in math_prefixes:
-        if msg.startswith(prefix):
-            msg = msg[len(prefix):].strip()
+    expr_in = original_msg.lower().replace("^", "**")
+    for prefix in [
+        "what is ", "whats ", "what's ", "calculate ", "solve ", "compute ",
+        "evaluate ", "find ", "give me ", "tell me ", "can you solve ",
+        "can you calculate ", "can you evaluate ", "can you compute "
+    ]:
+        if expr_in.startswith(prefix):
+            expr_in = expr_in[len(prefix):].strip()
             break
     import concurrent.futures
-    def math_eval(expr):
+    def math_eval(expr: str):
         try:
-            # Matrix support
             if expr.startswith("matrix"):
-                expr = expr.replace("matrix", "").strip()
-                matrices = re.findall(r'\[\[.*?\]\]', expr)
-                mats = [Matrix(eval(m)) for m in matrices]
-                if '*' in expr or 'x' in expr:
-                    result = mats[0] * mats[1]
-                else:
-                    result = mats[0]
-                return f"Matrix result: {result}"
-            # Calculus: derivative, integral, limit
-            if expr.startswith("derivative") or expr.startswith("differentiate"):
-                expr2 = expr.replace("derivative", "").replace("differentiate", "").strip()
-                result = diff(expr2)
-                return f"Derivative: {result}"
-            if expr.startswith("integral") or expr.startswith("integrate"):
-                expr2 = expr.replace("integral", "").replace("integrate", "").strip()
-                result = integrate(expr2)
-                return f"Integral: {result}"
+                expr2 = expr.replace("matrix", "").strip()
+                mats = [Matrix(eval(m)) for m in re.findall(r'\[\[.*?\]\]', expr2)]
+                if len(mats) == 2 and ('*' in expr2 or 'x' in expr2):
+                    return f"Matrix result: {mats[0] * mats[1]}"
+                return f"Matrix: {mats[0]}" if mats else None
+            if expr.startswith(("derivative", "differentiate")):
+                e2 = expr.replace("derivative", "").replace("differentiate", "").strip()
+                return f"Derivative: {diff(e2)}"
+            if expr.startswith(("integral", "integrate")):
+                e2 = expr.replace("integral", "").replace("integrate", "").strip()
+                return f"Integral: {integrate(e2)}"
             if expr.startswith("limit"):
                 parts = expr.replace("limit", "").strip().split(',')
                 if len(parts) == 3:
-                    expr2, var, val = parts
-                    result = limit(expr2, Symbol(var.strip()), float(val.strip()))
-                    return f"Limit: {result}"
-            if expr.startswith("sum") or expr.startswith("summation"):
-                expr2 = expr.replace("sum", "").replace("summation", "").strip()
-                m = re.match(r'(.+),\s*\((.+),\s*(.+),\s*(.+)\)', expr2)
+                    e2, var, val = parts
+                    return f"Limit: {limit(e2, Symbol(var.strip()), float(val.strip()))}"
+            if expr.startswith(("sum", "summation")):
+                e2 = expr.replace("summation", "sum").replace("sum", "").strip()
+                m = re.match(r'(.+),\s*\((.+),\s*(.+),\s*(.+)\)', e2)
                 if m:
                     f, v, a, b = m.groups()
-                    result = summation(f, Symbol(v.strip()), int(a), int(b))
-                    return f"Summation: {result}"
+                    return f"Summation: {summation(f, Symbol(v.strip()), int(a), int(b))}"
             if expr.startswith("product"):
-                expr2 = expr.replace("product", "").strip()
-                m = re.match(r'(.+),\s*\((.+),\s*(.+),\s*(.+)\)', expr2)
+                e2 = expr.replace("product", "").strip()
+                m = re.match(r'(.+),\s*\((.+),\s*(.+),\s*(.+)\)', e2)
                 if m:
                     f, v, a, b = m.groups()
-                    result = Product(f, Symbol(v.strip()), int(a), int(b)).doit()
-                    return f"Product: {result}"
-            # Statistics: mean, std, variance
+                    return f"Product: {Product(f, Symbol(v.strip()), int(a), int(b)).doit()}"
+            # Series expansion: series f(x) around a up to n
+            if expr.startswith("series"):
+                # Example: series sin(x) around 0 up to 5
+                m = re.match(r'series\s+(.+)\s+around\s+([^\s]+)\s+up\s+to\s+(\d+)', expr)
+                if m:
+                    fexpr, around, n = m.groups()
+                    var = Symbol('x')
+                    try:
+                        a = float(around)
+                    except Exception:
+                        a = 0
+                    return str(sympy.series(sympy.sympify(fexpr), var, a, int(n)))
+            # Solve a system: system x+y=2; x-y=0
+            if expr.startswith("system") or (';' in expr and '=' in expr):
+                eqs = []
+                for part in re.split(r';|\n', expr.replace('system', '').strip()):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    if '=' in part:
+                        lhs, rhs = part.split('=',1)
+                        eqs.append(Eq(sympy.sympify(lhs), sympy.sympify(rhs)))
+                if eqs:
+                    sols = solve(eqs)
+                    return f"System solution: {sols}"
             if expr.startswith("mean"):
                 nums = [float(n) for n in re.findall(r'-?\d+\.?\d*', expr)]
-                result = sum(nums) / len(nums)
-                return f"Mean: {result}"
-            if expr.startswith("std") or expr.startswith("standard deviation"):
+                return f"Mean: {sum(nums)/len(nums)}" if nums else None
+            if expr.startswith(("std", "standard deviation")):
                 nums = [float(n) for n in re.findall(r'-?\d+\.?\d*', expr)]
-                mean = sum(nums) / len(nums)
-                result = (sum((x - mean) ** 2 for x in nums) / len(nums)) ** 0.5
-                return f"Standard deviation: {result}"
+                if not nums:
+                    return None
+                mu = sum(nums)/len(nums)
+                return f"Standard deviation: {(sum((u-mu)**2 for u in nums)/len(nums))**0.5}"
             if expr.startswith("variance"):
                 nums = [float(n) for n in re.findall(r'-?\d+\.?\d*', expr)]
-                mean = sum(nums) / len(nums)
-                result = sum((x - mean) ** 2 for x in nums) / len(nums)
-                return f"Variance: {result}"
-            # Fallback: try to evaluate as expression
-            if re.search(r"[\+\-\*/]", expr) and not re.fullmatch(r"\d+", expr):
-                result = sympy.sympify(expr).evalf()
-                if result == int(result):
-                    result = int(result)
-                return f"The answer is {result}"
-            if re.search(r"[\+\-\*/]", original_msg) and not re.fullmatch(r"\d+", original_msg):
-                result = sympy.sympify(original_msg).evalf()
-                if result == int(result):
-                    result = int(result)
-                return f"The answer is {result}"
+                if not nums:
+                    return None
+                mu = sum(nums)/len(nums)
+                return f"Variance: {sum((u-mu)**2 for u in nums)/len(nums)}"
             if expr.startswith("solve"):
-                expr2 = expr.replace("solve", "").strip()
-                if "=" in expr2:
-                    lhs, rhs = expr2.split("=")
+                e2 = expr.replace("solve", "").strip()
+                if "=" in e2:
+                    lhs, rhs = e2.split("=")
                     sol = solve(Eq(sympy.sympify(lhs), sympy.sympify(rhs)))
                 else:
-                    sol = solve(sympy.sympify(expr2))
+                    sol = solve(sympy.sympify(e2))
                 return f"Solution: {sol}"
             if expr.startswith("simplify"):
                 return f"Simplified: {simplify(expr.replace('simplify', '').strip())}"
@@ -829,127 +867,27 @@ def handle_math(msg):
                 return f"Expanded: {expand(expr.replace('expand', '').strip())}"
             if expr.startswith("factor"):
                 return f"Factored: {factor(expr.replace('factor', '').strip())}"
+            if re.search(r"[\\+\\-\\*/]", expr) and not re.fullmatch(r"\\d+", expr):
+                res = sympy.sympify(expr).evalf()
+                if res == int(res):
+                    res = int(res)
+                return f"The answer is {res}"
+            if re.search(r"[\\+\\-\\*/]", original_msg) and not re.fullmatch(r"\\d+", original_msg):
+                res = sympy.sympify(original_msg).evalf()
+                if res == int(res):
+                    res = int(res)
+                return f"The answer is {res}"
             return None
         except Exception as e:
             return f"Math error: {e}"
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(math_eval, msg)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(math_eval, expr_in)
         try:
-            return future.result(timeout=2)
+            return fut.result(timeout=3)
         except concurrent.futures.TimeoutError:
             return "Math error: Calculation took too long. Please try a simpler question."
-        # Matrix support
-        if msg.startswith("matrix"):
-            # Example: matrix [[1,2],[3,4]] * [[5,6],[7,8]]
-            expr = msg.replace("matrix", "").strip()
-            try:
-                matrices = re.findall(r'\[\[.*?\]\]', expr)
-                mats = [Matrix(eval(m)) for m in matrices]
-                if '*' in expr or 'x' in expr:
-                    result = mats[0] * mats[1]
-                else:
-                    result = mats[0]
-                signal.alarm(0)
-                return f"Matrix result: {result}"
-            except Exception as e:
-                signal.alarm(0)
-                return f"Matrix error: {e}"
-        # Calculus: derivative, integral, limit
-        if msg.startswith("derivative") or msg.startswith("differentiate"):
-            expr = msg.replace("derivative", "").replace("differentiate", "").strip()
-            result = diff(expr)
-            signal.alarm(0)
-            return f"Derivative: {result}"
-        if msg.startswith("integral") or msg.startswith("integrate"):
-            expr = msg.replace("integral", "").replace("integrate", "").strip()
-            result = integrate(expr)
-            signal.alarm(0)
-            return f"Integral: {result}"
-        if msg.startswith("limit"):
-            # Example: limit sin(x)/x, x, 0
-            parts = msg.replace("limit", "").strip().split(',')
-            if len(parts) == 3:
-                expr, var, val = parts
-                result = limit(expr, Symbol(var.strip()), float(val.strip()))
-                signal.alarm(0)
-                return f"Limit: {result}"
-        if msg.startswith("sum") or msg.startswith("summation"):
-            # Example: sum x, (x, 1, 10)
-            expr = msg.replace("sum", "").replace("summation", "").strip()
-            m = re.match(r'(.+),\s*\((.+),\s*(.+),\s*(.+)\)', expr)
-            if m:
-                f, v, a, b = m.groups()
-                result = summation(f, Symbol(v.strip()), int(a), int(b))
-                signal.alarm(0)
-                return f"Summation: {result}"
-        if msg.startswith("product"):
-            # Example: product x, (x, 1, 5)
-            expr = msg.replace("product", "").strip()
-            m = re.match(r'(.+),\s*\((.+),\s*(.+),\s*(.+)\)', expr)
-            if m:
-                f, v, a, b = m.groups()
-                result = Product(f, Symbol(v.strip()), int(a), int(b)).doit()
-                signal.alarm(0)
-                return f"Product: {result}"
-        # Statistics: mean, std, variance
-        if msg.startswith("mean"):
-            nums = [float(n) for n in re.findall(r'-?\d+\.?\d*', msg)]
-            result = sum(nums) / len(nums)
-            signal.alarm(0)
-            return f"Mean: {result}"
-        if msg.startswith("std") or msg.startswith("standard deviation"):
-            nums = [float(n) for n in re.findall(r'-?\d+\.?\d*', msg)]
-            mean = sum(nums) / len(nums)
-            result = (sum((x - mean) ** 2 for x in nums) / len(nums)) ** 0.5
-            signal.alarm(0)
-            return f"Standard deviation: {result}"
-        if msg.startswith("variance"):
-            nums = [float(n) for n in re.findall(r'-?\d+\.?\d*', msg)]
-            mean = sum(nums) / len(nums)
-            result = sum((x - mean) ** 2 for x in nums) / len(nums)
-            signal.alarm(0)
-            return f"Variance: {result}"
-        # Fallback: try to evaluate as expression
-        if re.search(r"[\+\-\*/]", msg) and not re.fullmatch(r"\d+", msg):
-            result = sympy.sympify(msg).evalf()
-            signal.alarm(0)
-            if result == int(result):
-                result = int(result)
-            return f"The answer is {result}"
-        if re.search(r"[\+\-\*/]", original_msg) and not re.fullmatch(r"\d+", original_msg):
-            result = sympy.sympify(original_msg).evalf()
-            signal.alarm(0)
-            if result == int(result):
-                result = int(result)
-            return f"The answer is {result}"
-        if msg.startswith("solve"):
-            expr = msg.replace("solve", "").strip()
-            if "=" in expr:
-                lhs, rhs = expr.split("=")
-                sol = solve(Eq(sympy.sympify(lhs), sympy.sympify(rhs)))
-            else:
-                sol = solve(sympy.sympify(expr))
-            signal.alarm(0)
-            return f"Solution: {sol}"
-        if msg.startswith("simplify"):
-            signal.alarm(0)
-            return f"Simplified: {simplify(msg.replace('simplify', '').strip())}"
-        if msg.startswith("expand"):
-            signal.alarm(0)
-            return f"Expanded: {expand(msg.replace('expand', '').strip())}"
-        if msg.startswith("factor"):
-            signal.alarm(0)
-            return f"Factored: {factor(msg.replace('factor', '').strip())}"
-        signal.alarm(0)
-    try:
-        # (Place the code that may raise TimeoutException or Exception here)
-        pass  # Replace with actual code
-    except TimeoutException:
-        return "Math error: Calculation took too long. Please try a simpler question."
-    except Exception as e:
-        return f"Math error: {e}"
-    return None
-
+        except Exception as e:
+            return f"Math error: {e}"
 # --- File Redaction Feature ---
 def redact_file_content(filename, redactions):
     filepath = os.path.join(UPLOADS_DIR, filename)
@@ -1272,6 +1210,136 @@ def generate_audio_text(prompt):
 def generate_embedding_text(prompt):
     return free_llm_generate(prompt, task='embedding')
 
+# --- Parallel Orchestration + Synthesis Helpers ---
+def run_parallel(tasks, max_workers=None, timeout=12):
+    """
+    Run a list of (name, callable) in parallel threads and collect non-empty results.
+    Returns a list of (name, result) preserving task names; exceptions return None.
+    """
+    import concurrent.futures
+    results = []
+    if max_workers is None:
+        try:
+            max_workers = int(os.getenv('MAX_WORKERS', '8'))
+        except Exception:
+            max_workers = 8
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        future_map = {ex.submit(func): name for name, func in tasks}
+        for fut in concurrent.futures.as_completed(future_map, timeout=timeout):
+            name = future_map.get(fut)
+            try:
+                val = fut.result(timeout=0)
+                if val:
+                    results.append((name, val))
+            except Exception:
+                # Skip failed tasks silently; other sources still contribute
+                continue
+    return results
+
+def synthesize_from_sources(user_msg, sources, personality=None):
+    """
+    Ask an LLM to synthesize a single, accurate answer from multiple sources.
+    If LLM synthesis is unavailable, fall back to a simple merged view.
+    """
+    # De-duplicate by name and trim very long entries
+    seen = set()
+    merged = []
+    for name, val in sources:
+        if not val:
+            continue
+        key = (name, str(val)[:100])
+        if key in seen:
+            continue
+        seen.add(key)
+        txt = val if isinstance(val, str) else json.dumps(val, ensure_ascii=False)
+        merged.append((name, txt[:1200]))
+    if not merged:
+        return None
+    bullet_lines = []
+    for n, v in merged:
+        bullet_lines.append(f"- {n}: {v}")
+    persona_hint = ''
+    if isinstance(personality, dict) and personality.get('preferred_tone'):
+        persona_hint = f"Tone: {personality.get('preferred_tone')}\n"
+    prompt = (
+        "Synthesize the most accurate, concise answer using all evidence.\n"
+        "Follow rules:\n"
+        "- Prefer exact math/KB facts; avoid speculation.\n"
+        "- If sources conflict, state the best-supported answer briefly.\n"
+        "- Only include code if user asked for it; keep it minimal.\n"
+        "- Be clear and helpful, in the user's language.\n\n"
+        f"User message:\n{user_msg}\n\n"
+        f"{persona_hint}Sources:\n" + "\n".join(bullet_lines) + "\n\nFinal answer:"
+    )
+    synthesized = free_llm_generate(prompt, task='text')
+    if synthesized and not synthesized.lower().startswith(('no valid gemini', 'huggingface api error')):
+        return synthesized.strip()
+    # Fallback: simple merge
+    return "\n\n".join([f"[{n}] {v}" for n, v in merged])
+
+def ensure_relevance(query, answer, sources, threshold=0.22):
+    """
+    Ensure the answer is relevant to the query and the collected sources.
+    If cosine-similarity is low, ask the LLM to refine for direct relevance.
+    Returns possibly-refined answer.
+    """
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        corpus = [query, answer] + [str(v) for _, v in sources[:5]]
+        vec = TfidfVectorizer().fit_transform(corpus)
+        import numpy as np
+        sim = (vec[0] @ vec[1].T).A[0][0]
+        if sim < threshold:
+            refine_prompt = (
+                "Refine the following answer to directly and accurately address the user question.\n"
+                "Only include information relevant to the question; drop unrelated text.\n\n"
+                f"Question: {query}\n"
+                f"Current answer: {answer}\n\n"
+                "Refined answer:"
+            )
+            refined = free_llm_generate(refine_prompt, task='text')
+            return refined or answer
+    except Exception:
+        pass
+    return answer
+
+def self_consistent_finalize(user_msg, sources, base_answer, samples=3):
+    """
+    Generate multiple candidates and pick the one most aligned with the question and sources.
+    """
+    candidates = [base_answer]
+    try:
+        styles = ["concise", "direct", "detailed"]
+        for s in styles[:max(0, samples-1)]:
+            prompt = (
+                f"Rewrite the final answer in a {s} style while staying strictly on-topic.\n"
+                f"Question: {user_msg}\n"
+                f"Answer: {base_answer}\n"
+                "Rewritten:"
+            )
+            cand = free_llm_generate(prompt, task='text')
+            if cand:
+                candidates.append(cand)
+        # Score by TF-IDF similarity to question + sources
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        texts = [user_msg] + [str(v) for _, v in sources[:8]]
+        corpus = texts + candidates
+        vec = TfidfVectorizer().fit_transform(corpus)
+        import numpy as np
+        q_vec = vec[0]
+        src_vec = vec[1:1+len(texts)-1].mean(axis=0)
+        best_idx = 0
+        best_score = -1
+        for i, _ in enumerate(candidates):
+            c_vec = vec[len(texts)+i]
+            score = (q_vec @ c_vec.T).A[0][0] + (src_vec @ c_vec.T).A[0][0]
+            if score > best_score:
+                best_score = score
+                best_idx = i
+        return candidates[best_idx]
+    except Exception:
+        return base_answer
+
 # --- Personality Adaptation ---
 def analyze_user_personality(username, msg):
     """
@@ -1427,26 +1495,31 @@ def analyze_user_personality(username, msg):
     return traits
 
 # --- Enhanced get_response: synthesize from all sources and adapt personality ---
-def get_response(msg, username=None, file_context=None, all_files=False, feedback=None):
-    # --- Intent check FIRST for instant response ---
+def get_response(msg, username=None, file_context=None, all_files=False, feedback=None, use_web=False, use_rag=False):
+    # --- Intent check FIRST; in parallel mode treat as one of many sources ---
     msg_corrected = correct_sentence(msg)
     msg_norm = normalize_grammar(msg_corrected)
+    sources = []
+    intent_already_added = False
     intent_reply = get_intent_response(msg_corrected)
     if intent_reply:
-        # Always generate follow-up for instant intent
-        followup = None
-        try:
-            followup_resp = requests.post("http://localhost:5050/generate/followup", json={"topic": msg_corrected})
-            if followup_resp.ok:
-                followup = followup_resp.json().get("followup", None)
-        except Exception:
-            pass
-        return {"type": "intent", "content": intent_reply, "followup": followup}
+        if AGGREGATION_MODE == 'parallel':
+            sources.append(('intent', intent_reply))
+            intent_already_added = True
+        else:
+            # Priority mode returns immediately for fast UX
+            followup = None
+            try:
+                followup_resp = requests.post("http://localhost:5050/generate/followup", json={"topic": msg_corrected})
+                if followup_resp.ok:
+                    followup = followup_resp.json().get("followup", None)
+            except Exception:
+                pass
+            return {"type": "intent", "content": intent_reply, "followup": followup}
     # --- Model/Personality selection per user ---
     import flask
     model = flask.session.get('model')
     personality = flask.session.get('personality')
-    sources = []
     # If not set, try user_data.json
     if username and (not model or not personality):
         try:
@@ -1473,7 +1546,7 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
     }
     if use_custom:
         # Use custom model for everything good
-        result = custom_everything_good(msg_norm, context)
+        result = custom_super_generate(msg_norm, context) or custom_everything_good(msg_norm, context)
         # Compose sources for unified handling
         sources.append(('custom_text', result.get('text')))
         sources.append(('custom_code', result.get('code')))
@@ -1493,7 +1566,7 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
             sources.append(('prediction', f"Prediction error: {e}"))
     # --- Personality adaptation ---
     personality = analyze_user_personality(username, msg) if username else {}
-    # 0. Tool/plugin execution
+    # 0. Structured tool call\n    call = parse_tool_call(msg)\n    if call:\n        res = exec_tool(call['tool'], call.get('args', {}))\n        if res:\n            sources.append(('tool', json.dumps(res)))\n    # 0. Tool/plugin execution
     tool_result = call_tool_plugin(msg_norm)
     if tool_result:
         sources.append(('tool', tool_result))
@@ -1564,6 +1637,9 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
                 sources.append(('speech', "Speech generation unavailable."))
     # 7. Intent/KB
     intent_reply = get_intent_response(msg_corrected)
+    # In parallel mode, avoid early return here if we've already added intent
+    if AGGREGATION_MODE == 'parallel' and intent_already_added:
+        intent_reply = None
     # Only return intent immediately for greeting, goodbye, thanks, feeling, funny, creator, capabilities
     if intent_reply:
         greeting_tags = ["greeting", "goodbye", "thanks", "feeling", "funny", "creator", "capabilities"]
@@ -1577,99 +1653,133 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
     kb_reply = get_from_knowledge_base(msg_corrected)
     if kb_reply:
         sources.append(('kb', kb_reply))
-
-    # 7.5. Gemini primary, Local GPT+RAG fallback (with user model/personality)
-    gemini_reply = None
+    # Vector index RAG over uploads/data
     try:
-        gemini_reply = ask_gemini(msg_corrected)
-    except Exception as e:
-        gemini_reply = None
-    if gemini_reply:
-        sources.append(('gemini', gemini_reply))
-    else:
-        # Local GPT + RAG fallback (using user model/personality)
-        def retrieve_kb_context(query, kb=knowledge_base, top_n=3):
-            matches = []
-            for q, a in kb.items():
-                if q and query.lower() in q:
-                    matches.append((q, a))
-            # Fallback: fuzzy match if not enough
-            if len(matches) < top_n:
-                for q, a in kb.items():
-                    if len(matches) >= top_n:
-                        break
-                    if query.lower() in a.lower() and (q, a) not in matches:
-                        matches.append((q, a))
-            return matches[:top_n]
-
-        kb_context = retrieve_kb_context(msg_corrected)
-        if kb_context:
-            context_str = '\n'.join([f"Q: {q}\nA: {a}" for q, a in kb_context])
-            prompt = f"You are a helpful AI assistant. Use the following knowledge base to answer the user's question.\n{context_str}\nUser: {msg_corrected}\nAI:"
-            gpt_rag_reply = local_gpt.generate(prompt, max_length=180)
-            if gpt_rag_reply:
-                sources.append(('gpt_rag', gpt_rag_reply))
-    # 8. Memory/context
-    if username:
-        recent = get_recent_conversation(username, n=5)
-        if recent:
-            context = '\n'.join([f"User: {r['user_msg']}\nAI: {r['bot_reply']}" for r in recent])
-            # Use free LLM for context-based answer
-            mem_reply = free_llm_generate(f"{msg}\n\nContext:\n{context}", task='text')
-            if mem_reply:
-                sources.append(('memory', mem_reply))
-    # 9. LLM fallback (free only)
-    llm_reply = free_llm_generate(msg_corrected, task='text')
-    if llm_reply:
-        sources.append(('llm', llm_reply))
-    # 10. Google fallback
-    google_reply = ask_google(msg_corrected)
-    if google_reply:
-        sources.append(('google', google_reply))
-    # 11. Website cross-reference (if query is informational)
-    if any(q in msg_norm for q in ['what', 'who', 'when', 'where', 'why', 'how', '?']):
-        try:
-            summary = wikipedia.summary(msg_corrected, sentences=2)
-            sources.append(('wikipedia', f"Wikipedia: {summary}"))
-        except Exception:
-            pass
-    # --- Synthesize best answer ---
-    priority = ['math', 'code', 'speech', 'intent', 'kb', 'file', 'files', 'memory', 'llm', 'tool', 'google', 'wikipedia', 'image', 'time', 'location']
-    # Synthesize best answer and always generate enhanced text for each sentence
-    best_type = None
-    best_content = None
-    best_lang = None
-    for p in priority:
-        for src, val in sources:
-            if src == p and val:
-                best_type = src
-                if src == 'code' and isinstance(val, dict):
-                    best_content = val['content']
-                    best_lang = val['language']
-                else:
-                    best_content = val
-                break
-        if best_content:
-            break
-    if not best_content and sources:
-        best_type = 'multi'
-        best_content = '\n\n'.join([f"[{src}] {val}" for src, val in sources if val])
-    if username and personality and best_content:
-        best_content = adapt_response_style(best_content, personality)
-    # Always generate follow-up and enhanced text for each sentence
-    followup = None
-    enhanced_sentences = []
-    try:
-        # Split best_content into sentences and enhance each with LLM
-        import re
-        sentences = re.split(r'(?<=[.!?])\s+', str(best_content))
-        for sent in sentences:
-            if sent.strip():
-                enhanced = free_llm_generate(f"Enhance this sentence for clarity, creativity, and helpfulness: {sent}", task='text')
-                enhanced_sentences.append(enhanced)
-        enhanced_text = '\n'.join(enhanced_sentences)
+        vec_hits = query_vector_index(msg_corrected, top_k=3)
+        if vec_hits:
+            ctx = '\n'.join([f"[{h['source']}] {h['chunk']}" for h in vec_hits])
+            vec_prompt = f"Use the following retrieved context to answer the user.\n{ctx}\nQuestion: {msg_corrected}\nAnswer:"
+            vec_ans = free_llm_generate(vec_prompt, task='text')
+            if vec_ans:
+                sources.append(('vector_kb', vec_ans))
     except Exception:
-        enhanced_text = best_content
+        pass
+
+    # 7.5–11. Parallel external knowledge/LLM lookups
+    def _task_gemini():
+        try:
+            return ask_gemini(msg_corrected)
+        except Exception:
+            return None
+
+    def _task_gpt_rag():
+        try:
+            def retrieve_kb_context(query, kb=knowledge_base, top_n=3):
+                matches = []
+                for q, a in kb.items():
+                    if q and query.lower() in q:
+                        matches.append((q, a))
+                if len(matches) < top_n:
+                    for q, a in kb.items():
+                        if len(matches) >= top_n:
+                            break
+                        if query.lower() in a.lower() and (q, a) not in matches:
+                            matches.append((q, a))
+                return matches[:top_n]
+            kb_context = retrieve_kb_context(msg_corrected)
+            if kb_context:
+                context_str = '\n'.join([f"Q: {q}\nA: {a}" for q, a in kb_context])
+                prompt = f"You are a helpful AI assistant. Use the following knowledge base to answer the user's question.\n{context_str}\nUser: {msg_corrected}\nAI:"
+                return local_gpt.generate(prompt, max_length=180)
+        except Exception:
+            return None
+
+    def _task_memory():
+        try:
+            if not username:
+                return None
+            recent = get_recent_conversation(username, n=5)
+            if not recent:
+                return None
+            context = '\n'.join([f"User: {r['user_msg']}\nAI: {r['bot_reply']}" for r in recent])
+            return free_llm_generate(f"{msg}\n\nContext:\n{context}", task='text')
+        except Exception:
+            return None
+
+    def _task_llm():
+        try:
+            return free_llm_generate(msg_corrected, task='text')
+        except Exception:
+            return None
+
+    def _task_google():
+        try:
+            return ask_google(msg_corrected)
+        except Exception:
+            return None
+
+    def _task_wikipedia():
+        try:
+            if any(q in msg_norm for q in ['what', 'who', 'when', 'where', 'why', 'how', '?']):
+                return f"Wikipedia: {wikipedia.summary(msg_corrected, sentences=2)}"
+            return None
+        except Exception:
+            return None
+
+    parallel_results = run_parallel([
+        ('gemini', _task_gemini),
+        ('gpt_rag', _task_gpt_rag),
+        ('memory', _task_memory),
+        ('llm', _task_llm),
+        ('google', _task_google),
+        ('wikipedia', _task_wikipedia),
+    ], max_workers=6)
+    for name, val in parallel_results:
+        if val:
+            sources.append((name, val))
+    # --- Synthesize best answer ---
+    followup = None
+    best_lang = None
+    if AGGREGATION_MODE == 'parallel':
+        # Combine all sources and synthesize one final response
+        enhanced_text = synthesize_from_sources(msg_corrected, sources, personality)
+        if username and personality and enhanced_text:
+            enhanced_text = adapt_response_style(enhanced_text, personality)
+        best_type = 'multi'
+    else:
+        # Legacy priority selection
+        priority = ['math', 'code', 'speech', 'intent', 'kb', 'file', 'files', 'memory', 'llm', 'tool', 'google', 'wikipedia', 'image', 'time', 'location']
+        best_type = None
+        best_content = None
+        for p in priority:
+            for src, val in sources:
+                if src == p and val:
+                    best_type = src
+                    if src == 'code' and isinstance(val, dict):
+                        best_content = val['content']
+                        best_lang = val['language']
+                    else:
+                        best_content = val
+                    break
+            if best_content:
+                break
+        if not best_content and sources:
+            best_type = 'multi'
+            best_content = '\n\n'.join([f"[{src}] {val}" for src, val in sources if val])
+        if username and personality and best_content:
+            best_content = adapt_response_style(best_content, personality)
+        # Optional: sentence-level enhancement (kept for legacy mode only)
+        enhanced_sentences = []
+        try:
+            import re
+            sentences = re.split(r'(?<=[.!?])\s+', str(best_content))
+            for sent in sentences:
+                if sent.strip():
+                    enhanced = free_llm_generate(f"Enhance this sentence for clarity, creativity, and helpfulness: {sent}", task='text')
+                    enhanced_sentences.append(enhanced)
+            enhanced_text = '\n'.join(enhanced_sentences)
+        except Exception:
+            enhanced_text = best_content
     try:
         followup_resp = requests.post("http://localhost:5050/generate/followup", json={"topic": msg_corrected})
         if followup_resp.ok:
@@ -1714,6 +1824,69 @@ def adapt_response_style(response, personality):
         response = response.replace('!', '.')
     return response
 
+# --- Structured Tools (Schemas + Executors) ---
+TOOLS = {
+    "calculator": {
+        "schema": {
+            "type": "object",
+            "properties": {"expr": {"type": "string"}},
+            "required": ["expr"]
+        }
+    },
+    "wiki_summary": {
+        "schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"]
+        }
+    },
+    "code_exec": {
+        "schema": {
+            "type": "object",
+            "properties": {"language": {"type": "string"}, "code": {"type": "string"}},
+            "required": ["language", "code"]
+        }
+    }
+}
+
+
+def exec_tool(name, args):
+    try:
+        # Schema validation
+        schema = TOOLS.get(name, {}).get('schema')
+        if schema is not None:
+            validate(instance=args, schema=schema)
+        if name == 'calculator':
+            expr = args.get('expr','')
+            val = handle_math(expr) or 'No result'
+            return {"tool": name, "result": val}
+        if name == 'wiki_summary':
+            import wikipedia
+            q = args.get('query','')
+            return {"tool": name, "result": wikipedia.summary(q, sentences=2)}
+        if name == 'code_exec':
+            lang = args.get('language','python')
+            code = args.get('code','')
+            out, err = run_code(code, lang)
+            return {"tool": name, "result": out or err or ''}
+    except ValidationError as ve:
+        return {"tool": name, "error": f"Invalid args: {ve.message}"}
+    except Exception as e:
+        return {"tool": name, "error": str(e)}
+    return {"tool": name, "error": "Unknown tool"}
+def parse_tool_call(text):
+    """Parse inline JSON tool call: {"tool":"name","args":{...}}"""
+    try:
+        m = re.search(r"\{\s*\"tool\"\s*:\s*\"(.*?)\"[\s\S]*?\"args\"\s*:\s*(\{[\s\S]*\})\s*\}", text)
+        if not m:
+            return None
+        tool = m.group(1)
+        args = json.loads(m.group(2))
+        if tool in TOOLS:
+            return {"tool": tool, "args": args}
+    except Exception:
+        return None
+    return None
 # --- Tool/Plugin Execution (WolframAlpha, Wikipedia, Calculator, etc.) ---
 def call_tool_plugin(query):
     """
@@ -2045,9 +2218,261 @@ from custom_model.custom_llm import (
     generate_code as custom_generate_code,
     generate_speech as custom_generate_speech,
     estimate_probability as custom_estimate_probability,
-    everything_good as custom_everything_good
+    everything_good as custom_everything_good,
+    super_generate as custom_super_generate
 )
 
 # Load custom model (example, can be improved for device/model selection)
 CUSTOM_MODEL_PATH = os.path.join('custom_model', 'custom_llm_weights.pth')
-custom_model = load_custom_llm(CUSTOM_MODEL_PATH, device='cpu')
+custom_model = load_custom_llm(CUSTOM_MODEL_PATH, device='auto')
+
+
+
+
+# --- Web fetching and summarization ---
+def extract_urls(text):
+    try:
+        return re.findall(r"https?://[^\s)]+", text)
+    except Exception:
+        return []
+
+def fetch_url_content(url, timeout=8):
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        r = requests.get(url, headers=headers, timeout=timeout)
+        r.raise_for_status()
+        html = r.text
+        soup = BeautifulSoup(html, 'html.parser')
+        for tag in soup(["script", "style", "noscript"]):
+            tag.decompose()
+        text = "\n".join([t.strip() for t in soup.get_text("\n").splitlines() if t.strip()])
+        if len(text) > 20000:
+            text = text[:20000]
+        title = soup.title.string.strip() if soup.title else url
+        return {"url": url, "title": title, "text": text}
+    except Exception as e:
+        return {"url": url, "title": url, "text": f"[Fetch error] {e}"}
+
+def summarize_text_block(text, question=None, max_tokens_hint=800):
+    try:
+        instr = (
+            "Summarize the content clearly with key points and facts. "
+            "If a question is provided, focus strictly on answering it based on this content."
+        )
+        if question:
+            prompt = f"{instr}\n\nQuestion: {question}\n\nContent:\n{text}\n\nSummary:"
+        else:
+            prompt = f"{instr}\n\nContent:\n{text}\n\nSummary:"
+        return free_llm_generate(prompt, task='text')
+    except Exception:
+        return None
+
+def web_summarize_url(url, question=None):
+    data = fetch_url_content(url)
+    text = data.get('text') or ''
+    if text.startswith('[Fetch error]'):
+        return {"summary": text, "title": data.get('title', url), "url": url}
+    summary = summarize_text_block(text, question)
+    return {"summary": summary or text[:800], "title": data.get('title', url), "url": url}
+
+def web_search_and_summarize(query, num_results=3):
+    if not SERPAPI_KEY:
+        return {"summary": "Google API key missing.", "results": []}
+    try:
+        results = serpapi_search({"q": query, "api_key": SERPAPI_KEY, "engine": "google"})
+        links = []
+        for item in results.get('organic_results', [])[:num_results]:
+            link = item.get('link') or item.get('url')
+            if link:
+                links.append(link)
+        summaries = []
+        for link in links:
+            summaries.append(web_summarize_url(link, question=query))
+        bullets = []
+        for s in summaries:
+            bullets.append(f"- ({s['title']}) {s['summary']}")
+        prompt = (
+            "Using the multi-page summaries below, write a concise, accurate synthesis that directly answers the query. "
+            "Include short inline citations [1], [2], ... mapping to the ordered sources.\n\n"
+            f"Query: {query}\n\nSummaries by page:\n" + "\n".join(bullets) + "\n\nSynthesis:"
+        )
+        synthesis = free_llm_generate(prompt, task='text')
+        cites = [s.get('url') for s in summaries]
+        return {"summary": synthesis, "results": summaries, "citations": cites}
+    except Exception as e:
+        return {"summary": f"Search/summarization error: {e}", "results": []}
+
+# --- Lightweight Vector Index over uploads/data ---
+def _get_st_model():
+    global _ST_MODEL
+    if _ST_MODEL is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            _ST_MODEL = SentenceTransformer('all-MiniLM-L6-v2')
+        except Exception:
+            _ST_MODEL = False
+    return _ST_MODEL
+
+def build_vector_index(sources=None, chunk_chars=600):
+    """
+    Build/update a simple vector index from text files in uploads/ and data/.
+    Stores embeddings in npz and metadata in JSON.
+    """
+    try:
+        import numpy as np
+    except Exception:
+        return False, 'numpy not available'
+    st = _get_st_model()
+    if not st:
+        return False, 'SentenceTransformer unavailable'
+    roots = sources or [UPLOADS_DIR, os.path.join(os.path.dirname(__file__), 'data')]
+    records = []
+    texts = []
+    for root in roots:
+        if not os.path.exists(root):
+            continue
+        for dirpath, _, filenames in os.walk(root):
+            for fname in filenames:
+                path = os.path.join(dirpath, fname)
+                if not any(fname.lower().endswith(ext) for ext in ('.txt', '.md', '.json', '.py', '.html', '.csv', '.pdf', '.docx', '.xlsx')):
+                    continue
+                content, err = (get_uploaded_file_content(fname) if root == UPLOADS_DIR else (None, None))
+                if root != UPLOADS_DIR:
+                    try:
+                        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                    except Exception:
+                        continue
+                if not content:
+                    continue
+                for i in range(0, len(content), chunk_chars):
+                    chunk = content[i:i+chunk_chars]
+                    texts.append(chunk)
+                    records.append({'source': os.path.relpath(path, os.path.dirname(__file__)), 'offset': i})
+    if not texts:
+        return False, 'No text to index'
+    embs = st.encode(texts, show_progress_bar=False)
+    import numpy as np
+    try:
+        import faiss
+        index = faiss.IndexFlatIP(len(embs[0]))
+        # Normalize for cosine via inner product
+        X = embs / (np.linalg.norm(embs, axis=1, keepdims=True) + 1e-8)
+        index.add(X.astype('float32'))
+        faiss.write_index(index, os.path.join(VECTOR_INDEX_DIR, 'faiss.index'))
+    except Exception:
+        np.savez(os.path.join(VECTOR_INDEX_DIR, 'index.npz'), X=embs)
+    with open(os.path.join(VECTOR_INDEX_DIR, 'meta.json'), 'w', encoding='utf-8') as f:
+        json.dump({'records': records}, f, indent=2)
+    return True, f'Indexed {len(texts)} chunks from {len(records)} records.'
+def query_vector_index(query, top_k=5):
+    try:
+        import numpy as np
+        st = _get_st_model()
+        if not st:
+            return []
+        npz_path = os.path.join(VECTOR_INDEX_DIR, 'index.npz')
+        meta_path = os.path.join(VECTOR_INDEX_DIR, 'meta.json')
+        if not os.path.exists(npz_path) or not os.path.exists(meta_path):
+            ok, _ = build_vector_index()
+            if not ok:
+                return []
+        try:
+            import faiss
+            import numpy as np
+            meta_path = os.path.join(VECTOR_INDEX_DIR, 'meta.json')
+            index_path = os.path.join(VECTOR_INDEX_DIR, 'faiss.index')
+            if os.path.exists(index_path):
+                index = faiss.read_index(index_path)
+                st = _get_st_model()
+                q = st.encode([query])[0]
+                qn = q / (np.linalg.norm(q) + 1e-8)
+                D, I = index.search(np.array([qn], dtype='float32'), top_k)
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    meta = json.load(f)['records']
+                results = []
+                for i in I[0]:
+                    if int(i) < 0 or int(i) >= len(meta):
+                        continue
+                    rec = meta[int(i)]
+                    src = os.path.join(os.path.dirname(__file__), rec['source'])
+                    chunk = ''
+                    try:
+                        with open(src, 'r', encoding='utf-8', errors='ignore') as f:
+                            f.seek(rec['offset'])
+                            chunk = f.read(600)
+                    except Exception:
+                        chunk = ''
+                    results.append({'source': rec['source'], 'offset': rec['offset'], 'chunk': chunk})
+                return results
+        except Exception:
+            pass
+        import numpy as np
+        data = np.load(npz_path)
+        X = data['X']
+        q = st.encode([query])[0]
+        sims = (X @ q) / (np.linalg.norm(X, axis=1) * np.linalg.norm(q) + 1e-8)
+        idxs = sims.argsort()[-top_k:][::-1]
+        with open(meta_path, 'r', encoding='utf-8') as f:
+            meta = json.load(f)['records']
+        results = []
+        for i in idxs:
+            rec = meta[int(i)]
+            src = os.path.join(os.path.dirname(__file__), rec['source'])
+            chunk = ''
+            try:
+                with open(src, 'r', encoding='utf-8', errors='ignore') as f:
+                    f.seek(rec['offset'])
+                    chunk = f.read(600)
+            except Exception:
+                chunk = ''
+            results.append({'source': rec['source'], 'offset': rec['offset'], 'chunk': chunk})
+        return results
+    except Exception:
+        return []
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def generate_image_advanced(prompt, negative_prompt=None, seed=None, num_images=1):
+    import replicate
+    token = os.getenv("REPLICATE_API_TOKEN")
+    if not token:
+        return []
+    try:
+        args = {"prompt": prompt}
+        if negative_prompt:
+            args["negative_prompt"] = negative_prompt
+        if seed is not None:
+            try:
+                args["seed"] = int(seed)
+            except Exception:
+                pass
+        output = replicate.run(
+            "stability-ai/sdxl:9fa24d7e8cf3e4c0b7e7b2e0b1e5e1b6b6e1b6e1b6e1b6e1b6e1b6e1b6e1b6",
+            input=args,
+            api_token=token
+        )
+        urls = []
+        if isinstance(output, list):
+            urls = [str(u) for u in output][:max(1, int(num_images or 1))]
+        elif isinstance(output, str):
+            urls = [output]
+        return urls
+    except Exception:
+        return []

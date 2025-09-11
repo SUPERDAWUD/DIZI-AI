@@ -8,28 +8,29 @@ app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'dizi_secret')
 
 def get_code_gen():
     try:
+        import torch
         from transformers import pipeline, set_seed
         set_seed(42)
-        return pipeline("text-generation", model="Salesforce/codegen-350M-mono", device=0)
+        device = 0 if torch.cuda.is_available() else -1
+        return pipeline("text-generation", model="Salesforce/codegen-350M-mono", device=device)
     except Exception as e:
         print(f"CodeGen model load error: {e}")
         return None
 
 def get_text_gen():
     try:
+        import torch
         from transformers import pipeline, set_seed
         set_seed(42)
+        device = 0 if torch.cuda.is_available() else -1
         # Try a more capable instruction-following model if available
-        # Use Mistral-7B-Instruct if installed, else fallback to gpt2
         try:
-            return pipeline("text-generation", model="mistralai/Mistral-7B-Instruct-v0.2", device=0)
+            return pipeline("text-generation", model="mistralai/Mistral-7B-Instruct-v0.2", device=device)
         except Exception:
-            # Fallback to flan-t5-base (if available)
             try:
-                return pipeline("text2text-generation", model="google/flan-t5-base", device=0)
+                return pipeline("text2text-generation", model="google/flan-t5-base", device=device)
             except Exception:
-                # Fallback to gpt2
-                return pipeline("text-generation", model="gpt2", device=0)
+                return pipeline("text-generation", model="gpt2", device=device)
     except Exception as e:
         print(f"TextGen model load error: {e}")
         return None

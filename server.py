@@ -1,7 +1,7 @@
 from flask import Flask, render_template, request, jsonify, send_from_directory, session, redirect, url_for
 from werkzeug.utils import secure_filename
 import os
-from chat import get_response
+from chat import get_response, web_summarize_url, web_search_and_summarize, build_vector_index, query_vector_index
 from utils import start_generator_api
 from functools import wraps
 import json
@@ -41,7 +41,7 @@ def home():
 def chat_route():
     user_msg = request.json.get("message")
     user_name = request.json.get("user")
-    bot_reply = get_response(user_msg, username=user_name)
+    bot_reply = get_response(user_msg, username=user_name, use_web=bool(request.json.get('web')), use_rag=bool(request.json.get('rag')))
     return jsonify({"response": bot_reply})
 
 @app.route("/upload", methods=["POST"])
@@ -237,6 +237,196 @@ def api_load_chat():
 
 if __name__ == "__main__":
     start_generator_api()
+    start_indexer_watch()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 
+
+
+@app.route('/api/web-summarize', methods=['POST'])
+def api_web_summarize():
+    data = request.get_json() or {}
+    query = data.get('query')
+    url = data.get('url')
+    n = int(data.get('num_results', 3))
+    if url:
+        result = web_summarize_url(url, question=query)
+        return jsonify({'ok': True, 'result': result})
+    if query:
+        result = web_search_and_summarize(query, num_results=n)
+        return jsonify({'ok': True, 'result': result})
+    return jsonify({'ok': False, 'error': 'Provide url or query'}), 400
+
+
+@app.route('/api/rag/reindex', methods=['POST'])
+@dev_mode_required
+def api_rag_reindex():
+    ok, msg = build_vector_index()
+    return jsonify({'ok': ok, 'message': msg})
+
+@app.route('/api/rag/query', methods=['POST'])
+@dev_mode_required
+def api_rag_query():
+    data = request.get_json() or {}
+    q = data.get('query','')
+    k = int(data.get('top_k', 5))
+    hits = query_vector_index(q, top_k=k)
+    return jsonify({'ok': True, 'hits': hits})
+
+@app.route('/api/set-device', methods=['POST'])
+@dev_mode_required
+def api_set_device():
+    from chat import local_gpt
+    data = request.get_json() or {}
+    device = data.get('device','auto')
+    try:
+        if hasattr(local_gpt, 'set_device'):
+            local_gpt.set_device(device)
+    except Exception:
+        pass
+    return jsonify({'device': device})
+
+@app.route('/api/set-aggregation-mode', methods=['POST'])
+@dev_mode_required
+def api_set_aggregation_mode():
+    import chat as chat_mod
+    data = request.get_json() or {}
+    mode = (data.get('mode') or 'parallel').lower()
+    if mode not in ('parallel','priority'):
+        return jsonify({'ok': False, 'error': 'mode must be parallel or priority'}), 400
+    chat_mod.AGGREGATION_MODE = mode
+    return jsonify({'ok': True, 'mode': chat_mod.AGGREGATION_MODE})
+
+@app.route("/chat/stream", methods=["POST"])
+def chat_route_stream():
+    """Server-Sent Events streaming of a chat response (chunked or Gemini streaming)."""
+    def gen():
+        try:
+            data = request.get_json() or {}
+            user_msg = data.get("message", "")
+            user_name = data.get("user", None)
+            prefer_gemini = bool(data.get("prefer_gemini_stream", True))
+            web = bool(data.get("web", False))
+            rag = bool(data.get("rag", False))
+            # Try Gemini token streaming if configured
+            if prefer_gemini:
+                try:
+                    import os
+                    import google.generativeai as genai
+                    api_key = os.getenv('GEMINI_API_KEY')
+                    if api_key:
+                        genai.configure(api_key=api_key)
+                        model = genai.GenerativeModel('models/gemini-2.5-pro')
+                        resp = model.generate_content(user_msg, stream=True)
+                        # Emit meta
+                        yield "data: " + json.dumps({"meta": {"type":"gemini_stream"}}) + "\n\n"
+                        for chunk in resp:
+                            if hasattr(chunk, 'text') and chunk.text:
+                                yield "data: " + json.dumps({"delta": chunk.text}) + "\n\n"
+                        yield "data: " + json.dumps({"done": True}) + "\n\n"
+                        return
+                except Exception:
+                    pass
+            # Fallback: use full response then chunk it
+            reply = get_response(user_msg, username=user_name, all_files=False, file_context=None, use_web=web, use_rag=rag)
+            meta = {k: reply.get(k) for k in ("type", "language", "personality", "followup") if isinstance(reply, dict)}
+            yield "data: " + json.dumps({"meta": meta}) + "\n\n"
+            content = reply.get("content", "") if isinstance(reply, dict) else str(reply)
+            buf = []
+            for token in content.split():
+                buf.append(token)
+                if len(" ".join(buf)) > 48:
+                    chunk = " ".join(buf) + " "
+                    yield "data: " + json.dumps({"delta": chunk}) + "\n\n"
+                    buf = []
+            if buf:
+                chunk = " ".join(buf)
+                yield "data: " + json.dumps({"delta": chunk}) + "\n\n"
+            yield "data: " + json.dumps({"done": True}) + "\n\n"
+        except Exception as e:
+            yield "data: " + json.dumps({"error": str(e)}) + "\n\n"
+    return app.response_class(gen(), mimetype='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+# --- Background Vector Indexer ---
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+except Exception:
+    Observer = None
+    FileSystemEventHandler = object
+
+class _IndexHandler(FileSystemEventHandler):
+    def __init__(self):
+        self._timer = None
+    def on_any_event(self, event):
+        try:
+            import threading
+            if self._timer:
+                self._timer.cancel()
+            def _rebuild():
+                try:
+                    from chat import build_vector_index
+                    build_vector_index()
+                except Exception:
+                    pass
+            self._timer = threading.Timer(1.0, _rebuild)
+            self._timer.start()
+        except Exception:
+            pass
+
+def start_indexer_watch():
+    if Observer is None:
+        return
+    try:
+        import os
+        handler = _IndexHandler()
+        obs = Observer()
+        up = os.path.join(os.getcwd(), 'uploads')
+        dt = os.path.join(os.getcwd(), 'data')
+        if os.path.exists(up):
+            obs.schedule(handler, up, recursive=True)
+        if os.path.exists(dt):
+            obs.schedule(handler, dt, recursive=True)
+        obs.daemon = True
+        obs.start()
+    except Exception:
+        pass
+
+
+
+from gtts import gTTS
+
+@app.route('/api/tts', methods=['POST'])
+def api_tts():
+    data = request.get_json() or {}
+    text = data.get('text','')
+    lang = data.get('lang','en')
+    if not text.strip():
+        return jsonify({'ok': False, 'error': 'Missing text'}), 400
+    try:
+        outdir = os.path.join('static','generated')
+        os.makedirs(outdir, exist_ok=True)
+        fname = f"tts_{int(time.time()*1000)}.mp3"
+        fpath = os.path.join(outdir, fname)
+        tts = gTTS(text=text, lang=lang)
+        tts.save(fpath)
+        return jsonify({'ok': True, 'url': f"/static/generated/{fname}"})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+
+
+
+
+@app.route('/api/image/generate', methods=['POST'])
+def api_image_generate():
+    from chat import generate_image_advanced
+    data = request.get_json() or {}
+    prompt = data.get('prompt','')
+    negative = data.get('negative_prompt')
+    seed = data.get('seed')
+    n = data.get('num_images', 1)
+    if not prompt:
+        return jsonify({'ok': False, 'error': 'Missing prompt'}), 400
+    urls = generate_image_advanced(prompt, negative_prompt=negative, seed=seed, num_images=n)
+    return jsonify({'ok': True, 'urls': urls})
