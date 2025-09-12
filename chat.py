@@ -14,7 +14,7 @@ except Exception:
     intent_clf = None
     intent_vectorizer = None
 # --- Device selection for inference (CPU/GPU) ---
-from flask import request as flask_request
+from flask import request as flask_request, session as flask_session
 inference_device = 'auto'
 
 if 'app' in globals():
@@ -69,8 +69,13 @@ import wikipedia
 import google.generativeai as genai
 # --- Local GPT and RAG ---
 from gpt_local import LocalGPT
-# --- Initialize Local GPT Model (load once) ---
-local_gpt = LocalGPT('all')
+# --- Lazy Local GPT Model init to reduce startup time ---
+local_gpt = None
+def get_local_gpt():
+    global local_gpt
+    if local_gpt is None:
+        local_gpt = LocalGPT('all')
+    return local_gpt
 
 # --- Flask App Initialization (ensure only one app instance) ---
 if 'app' not in globals():
@@ -103,6 +108,11 @@ SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 # Default to 'parallel' to look at everything concurrently and avoid prioritization.
 AGGREGATION_MODE = os.getenv("AGGREGATION_MODE", "parallel").lower()
 REASONING_MODE = os.getenv("REASONING_MODE", "auto").lower()  # off|auto|on
+REASONING_LEVEL = os.getenv("REASONING_LEVEL", "medium").lower()  # low|medium|high
+IMAGE_BACKEND_MODE = os.getenv("IMAGE_BACKEND_MODE", "auto").lower()  # auto|gemini|replicate
+GEN_TEMPERATURE = float(os.getenv("GEN_TEMPERATURE", "0.7"))
+GEN_TOP_P = float(os.getenv("GEN_TOP_P", "0.95"))
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "256"))
 try:
     torch.set_float32_matmul_precision('high')
 except Exception:
@@ -490,86 +500,19 @@ def extract_speech_request(msg):
         return topic or msg, tone, audience, length
     return None, None, None, None
 
-# Image generation (Replicate API)
+"""
+Image generation via Replicate only (OpenAI/DALL·E removed for OpenAI‑free setup).
+"""
 def generate_image_from_prompt(prompt):
-    import replicate
-    replicate_token = os.getenv("REPLICATE_API_TOKEN")
-    dalle_token = os.getenv("OPENAI_API_KEY")
-    if not replicate_token and not dalle_token:
-        return "No image generation API token is configured."
     try:
-        # Parse style/model/quality hints from prompt
-        style = None
-        model = None
-        quality = None
-        # Example: "draw a cat in anime style, high quality, using SDXL"
-        style_match = re.search(r"(anime|realistic|cartoon|sketch|oil painting|watercolor|pixel art|cyberpunk|fantasy|photorealistic)", prompt, re.I)
-        if style_match:
-            style = style_match.group(1).lower()
-        model_match = re.search(r"(sdxl|dall[\.-]?e|dalle|stable diffusion|midjourney|anything v3|dreamshaper|openjourney)", prompt, re.I)
-        if model_match:
-            model = model_match.group(1).lower()
-        quality_match = re.search(r"(high quality|ultra quality|4k|8k|hd|detailed|masterpiece)", prompt, re.I)
-        if quality_match:
-            quality = quality_match.group(1).lower()
-        # Clean prompt for model
-        clean_prompt = prompt
-        for m in [style, model, quality]:
-            if m:
-                clean_prompt = re.sub(m, '', clean_prompt, flags=re.I)
-        clean_prompt = clean_prompt.strip(', .')
-        # Model selection logic
-        if model and ("dall" in model or "openai" in model):
-            # Use DALL·E via OpenAI API
-            if not dalle_token:
-                return "DALL·E API key is missing."
-            import openai
-            openai.api_key = dalle_token
-            try:
-                response = openai.Image.create(
-                    prompt=clean_prompt + (f", {style}" if style else "") + (f", {quality}" if quality else ""),
-                    n=1,
-                    size="1024x1024"
-                )
-                url = response['data'][0]['url']
-                return f"Here is your DALL·E image: {url}"
-            except Exception as e:
-                return f"DALL·E error: {e}"
-        # Default: SDXL or other Replicate models
-        replicate_model = "stability-ai/sdxl"
-        if model:
-            if "anime" in model or "anything" in model:
-                replicate_model = "andite/anything-v4.0"
-            elif "dreamshaper" in model:
-                replicate_model = "lucataco/dreamshaper-v8"
-            elif "openjourney" in model:
-                replicate_model = "prompthero/openjourney"
-            elif "realistic" in model:
-                replicate_model = "stablediffusionapi/realistic-vision-v51"
-            elif "midjourney" in model:
-                replicate_model = "prompthero/openjourney"
-            elif "dall" in model:
-                # fallback to DALL·E above
-                pass
-        if style == "anime":
-            replicate_model = "andite/anything-v4.0"
-        elif style == "realistic":
-            replicate_model = "stablediffusionapi/realistic-vision-v51"
-        # Add quality to prompt
-        full_prompt = clean_prompt
-        if style:
-            full_prompt += f", {style} style"
-        if quality:
-            full_prompt += f", {quality}"
-        output = replicate.run(
-            f"{replicate_model}",
-            input={"prompt": full_prompt},
-            api_token=replicate_token
-        )
-        if output and isinstance(output, list):
-            return f"Here is your image: {output[0]}"
-        elif isinstance(output, str):
-            return f"Here is your image: {output}"
+        meta = generate_image_advanced(prompt, num_images=1, return_meta=True)
+        if isinstance(meta, dict) and meta.get('urls'):
+            backend = meta.get('backend') or 'unknown'
+            url = meta['urls'][0]
+            return f"Here is your image: {url} (via {backend})"
+        # Back-compat path
+        if isinstance(meta, list) and meta:
+            return f"Here is your image: {meta[0]}"
         return "Image generation failed."
     except Exception as e:
         return f"Image error: {e}"
@@ -596,28 +539,7 @@ def analyze_image_file(filename):
     except Exception as e:
         return f"Image analysis error: {e}"
 
-# Image generation (Replicate API)
-def generate_image_from_prompt(prompt):
-    import replicate
-    replicate_token = os.getenv("REPLICATE_API_TOKEN")
-    if not replicate_token:
-        return "Replicate API token is missing."
-    try:
-        # Use a popular, free, and public model: stability-ai/sdxl
-        output = replicate.run(
-            "stability-ai/sdxl:9fa24d7e8cf3e4c0b7e7b2e0b1e5e1b6b6e1b6e1b6e1b6e1b6e1b6e1b6e1b6",
-            input={"prompt": prompt},
-            api_token=replicate_token
-        )
-        if output and isinstance(output, list):
-            return f"Here is your image: {output[0]}"
-        elif isinstance(output, str):
-            return f"Here is your image: {output}"
-        return "Image generation failed."
-    except Exception as e:
-        return f"Image error: {e}"
-
-def extract_language(msg):
+# (Image generation helper consolidated)\r\n\r\ndef extract_language(msg):
     # Look for language keywords in the message
     languages = ['python', 'javascript', 'java', 'c++', 'c#', 'ruby', 'go', 'typescript', 'php', 'swift', 'kotlin', 'rust']
     for lang in languages:
@@ -1091,23 +1013,27 @@ def semantic_doc_qa(question, doc_text):
 # --- LLM Fallback (OpenAI/Gemini/Local) ---
 def llm_fallback(query, context=None):
     """
-    Uses an LLM API (OpenAI, Gemini, or local) to answer the query, optionally with context.
+    Local-first fallback to answer the query, optionally with context.
+    Avoids OpenAI; tries Gemini/HF via free_llm_generate, then LocalGPT.
     """
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return None
+    prompt = f"Context: {context}\n\nUser: {query}\nAI: " if context else query
+    # Try configured free providers (Gemini/HF); falls back to LocalGPT automatically
     try:
-        import openai
-        openai.api_key = api_key
-        prompt = f"Context: {context}\n\nUser: {query}\nAI: " if context else query
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "system", "content": "You are a helpful, expert AI assistant."},
-                      {"role": "user", "content": prompt}]
-        )
-        return response['choices'][0]['message']['content'].strip()
+        ans = free_llm_generate(prompt, task='text')
+        if ans and not str(ans).lower().startswith(('local generation unavailable', 'huggingface api error', 'gemini api error')):
+            return ans
     except Exception:
-        return None
+        pass
+    # Last resort: direct LocalGPT
+    try:
+        if 'local_gpt' in globals() and local_gpt is not None:
+            t = float(flask_session.get('temperature', GEN_TEMPERATURE)) if 'flask_session' in globals() else GEN_TEMPERATURE
+            p = float(flask_session.get('top_p', GEN_TOP_P)) if 'flask_session' in globals() else GEN_TOP_P
+            mx = int(flask_session.get('max_tokens', MAX_TOKENS)) if 'flask_session' in globals() else MAX_TOKENS
+            return get_local_gpt().generate(prompt, max_length=mx, do_sample=True, temperature=t, top_p=p)
+    except Exception:
+        pass
+    return None
 
 # --- Code Explanation and Inline Suggestion ---
 def explain_code(code, language='python'):
@@ -1134,12 +1060,37 @@ def free_llm_generate(prompt, task='text', language='en'):
     Uses free LLM APIs (Google Gemini, HuggingFace) for text/code/speech/image/video/audio generation.
     Returns the generated text or a clear error message.
     """
+    # Generation parameters (session overrides env defaults if present)
+    try:
+        t = float(flask_session.get('temperature', GEN_TEMPERATURE))
+    except Exception:
+        t = GEN_TEMPERATURE
+    try:
+        p = float(flask_session.get('top_p', GEN_TOP_P))
+    except Exception:
+        p = GEN_TOP_P
+    try:
+        max_len = int(flask_session.get('max_tokens', MAX_TOKENS))
+    except Exception:
+        max_len = MAX_TOKENS
+    sys_prompt = None
+    try:
+        sys_prompt = flask_session.get('system_prompt')
+    except Exception:
+        sys_prompt = None
     gemini_key = os.getenv('GEMINI_API_KEY')
     if gemini_key:
         try:
             genai.configure(api_key=gemini_key)
             model_name = GEMINI_MODELS.get(task, GEMINI_MODELS['text'])
-            model = genai.GenerativeModel(model_name)
+            try:
+                from google.generativeai.types import GenerationConfig
+                gcfg = GenerationConfig(temperature=t, top_p=p, max_output_tokens=max_len)
+                model = genai.GenerativeModel(model_name, generation_config=gcfg)
+            except Exception:
+                model = genai.GenerativeModel(model_name)
+            if sys_prompt:
+                prompt = f"{sys_prompt}\n\n{prompt}"
             if task == 'image':
                 response = model.generate_content(prompt)
             elif task == 'video':
@@ -1160,7 +1111,8 @@ def free_llm_generate(prompt, task='text', language='en'):
             else:
                 return str(response)
         except Exception as e:
-            return f"Gemini API error: {e}"
+            # Defer to next providers/local
+            pass
     hf_token = os.getenv('HF_API_TOKEN')
     if hf_token:
         try:
@@ -1186,8 +1138,30 @@ def free_llm_generate(prompt, task='text', language='en'):
                     return result[0]['text'].strip()
             return f"HuggingFace API error: {resp.text}"
         except Exception as e:
-            return f"HuggingFace API error: {e}"
-    return "No valid Gemini or HuggingFace API key found. Generation unavailable."
+            # Defer to next providers
+            pass
+    # Ollama local backend (if running locally)
+    try:
+        ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434').rstrip('/')
+        ollama_model = os.getenv('OLLAMA_MODEL', 'llama3.1:8b-instruct')
+        payload = {"model": ollama_model, "prompt": str(prompt), "stream": False, "options": {"temperature": t, "top_p": p}, "num_predict": max_len}
+        resp = requests.post(f"{ollama_host}/api/generate", json=payload, timeout=15)
+        if resp.ok:
+            j = resp.json()
+            if isinstance(j, dict) and j.get('response'):
+                return j['response'].strip()
+    except Exception:
+        pass
+    # Local fallback (no external APIs): use LocalGPT
+    try:
+        if 'local_gpt' in globals() and local_gpt is not None:
+            # Slightly longer for synthesis tasks
+            local_max = max_len if task in ('text','speech','code') else min(max_len, 180)
+            out = get_local_gpt().generate(str(prompt), max_length=local_max, do_sample=True, temperature=t, top_p=p)
+            return out
+    except Exception:
+        pass
+    return "Local generation unavailable."
 
 # Update all generation functions to use the correct task
 
@@ -1210,6 +1184,82 @@ def generate_audio_text(prompt):
 def generate_embedding_text(prompt):
     return free_llm_generate(prompt, task='embedding')
 
+# --- Universal Language Detection + Translation ---
+ISO_LANGS = {
+    'en':'English','es':'Spanish','fr':'French','de':'German','it':'Italian','pt':'Portuguese','ru':'Russian','ar':'Arabic','zh':'Chinese','ja':'Japanese','ko':'Korean','hi':'Hindi','bn':'Bengali','fa':'Persian','ur':'Urdu','tr':'Turkish','vi':'Vietnamese','th':'Thai','el':'Greek','he':'Hebrew'
+}
+
+def _script_heuristic(text):
+    import unicodedata
+    counts = {
+        'latin':0,'cyrillic':0,'arabic':0,'devanagari':0,'cjk':0,'greek':0,'hebrew':0,'hangul':0,'hiragana':0,'katakana':0
+    }
+    for ch in text:
+        try:
+            name = unicodedata.name(ch)
+        except Exception:
+            continue
+        n = name
+        if 'CYRILLIC' in n: counts['cyrillic']+=1
+        elif 'ARABIC' in n: counts['arabic']+=1
+        elif 'DEVANAGARI' in n: counts['devanagari']+=1
+        elif 'CJK' in n or 'IDEOGRAPH' in n: counts['cjk']+=1
+        elif 'GREEK' in n: counts['greek']+=1
+        elif 'HEBREW' in n: counts['hebrew']+=1
+        elif 'HANGUL' in n: counts['hangul']+=1
+        elif 'HIRAGANA' in n: counts['hiragana']+=1
+        elif 'KATAKANA' in n: counts['katakana']+=1
+        elif 'LATIN' in n: counts['latin']+=1
+    if not any(counts.values()):
+        return None
+    script = max(counts, key=lambda k: counts[k])
+    return script
+
+def detect_language(text):
+    """Detect ISO 639-1 code for language or 'unknown'."""
+    try:
+        from langdetect import detect
+        return detect(text)
+    except Exception:
+        pass
+    script = _script_heuristic(text)
+    if script == 'cyrillic':
+        return 'ru'
+    if script == 'arabic':
+        return 'ar'
+    if script == 'devanagari':
+        return 'hi'
+    if script in ('hiragana','katakana'): return 'ja'
+    if script == 'hangul': return 'ko'
+    if script == 'greek': return 'el'
+    if script == 'hebrew': return 'he'
+    if script == 'cjk': return 'zh'
+    # LLM last resort
+    try:
+        ans = free_llm_generate("Identify the language (ISO 639-1 code) of this text; output only the code: " + text[:400], task='text')
+        code = (ans or '').strip().lower().split()[0].strip('.:,;')
+        if len(code) in (2,3):
+            return code
+    except Exception:
+        pass
+    return 'unknown'
+
+def translate_text(text, target_lang='en'):
+    """Universal translation. Prefers cloud backends when available; falls back to local."""
+    src = detect_language(text)
+    if src == target_lang:
+        return text
+    instruction = (
+        f"Translate the following text from {ISO_LANGS.get(src, src)} to {ISO_LANGS.get(target_lang,target_lang)}. "
+        f"Preserve meaning and formatting. If it's ancient/unknown, infer the best modern equivalent.\n\n{text}"
+    )
+    try:
+        out = free_llm_generate(instruction, task='text')
+        if out and isinstance(out, str):
+            return out.strip()
+    except Exception:
+        pass
+    return text
 # --- Parallel Orchestration + Synthesis Helpers ---
 def run_parallel(tasks, max_workers=None, timeout=12):
     """
@@ -1261,21 +1311,90 @@ def synthesize_from_sources(user_msg, sources, personality=None):
     persona_hint = ''
     if isinstance(personality, dict) and personality.get('preferred_tone'):
         persona_hint = f"Tone: {personality.get('preferred_tone')}\n"
+    level = (REASONING_LEVEL if REASONING_LEVEL in ('low','medium','high') else 'medium')
+    style_hint = {
+        'low': 'Answer very concisely in 2-4 sentences.',
+        'medium': 'Be concise but include key details.',
+        'high': 'Be comprehensive yet clear; include rationale when helpful.'
+    }[level]
     prompt = (
         "Synthesize the most accurate, concise answer using all evidence.\n"
         "Follow rules:\n"
         "- Prefer exact math/KB facts; avoid speculation.\n"
         "- If sources conflict, state the best-supported answer briefly.\n"
         "- Only include code if user asked for it; keep it minimal.\n"
-        "- Be clear and helpful, in the user's language.\n\n"
+        "- Be clear and helpful, in the user's language.\n"
+        f"- {style_hint}\n\n"
         f"User message:\n{user_msg}\n\n"
         f"{persona_hint}Sources:\n" + "\n".join(bullet_lines) + "\n\nFinal answer:"
     )
     synthesized = free_llm_generate(prompt, task='text')
-    if synthesized and not synthesized.lower().startswith(('no valid gemini', 'huggingface api error')):
+    if synthesized and not str(synthesized).lower().startswith((
+        'no valid gemini', 'huggingface api error', 'local generation unavailable'
+    )):
         return synthesized.strip()
     # Fallback: simple merge
     return "\n\n".join([f"[{n}] {v}" for n, v in merged])
+
+def select_best_text_from_sources(user_msg, sources, extra_context=None):
+    """
+    Select the single best answer from multiple source candidates.
+    Scores each candidate by TF-IDF similarity to the question and (optionally) to extra retrieved context.
+    Returns the best candidate string, or None if no candidates.
+    """
+    try:
+        texts = []
+        names = []
+        for name, val in sources:
+            if not val:
+                continue
+            # Only consider textual candidates
+            if isinstance(val, dict):
+                v = val.get('content') or ''
+            else:
+                v = str(val)
+            if not v or len(v.strip()) < 2:
+                continue
+            names.append(name)
+            texts.append(v)
+        if not texts:
+            return None
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        corpus = [user_msg]
+        if extra_context:
+            corpus.append(str(extra_context))
+        corpus += texts
+        vec = TfidfVectorizer().fit_transform(corpus)
+        import numpy as np
+        q_vec = vec[0]
+        if extra_context:
+            ctx_vec = vec[1]
+            offs = 2
+        else:
+            ctx_vec = None
+            offs = 1
+        best_idx = 0
+        best_score = -1
+        for i, _ in enumerate(texts):
+            c_vec = vec[offs + i]
+            score = (q_vec @ c_vec.T).A[0][0]
+            if ctx_vec is not None:
+                score += (ctx_vec @ c_vec.T).A[0][0]
+            # Light preference for high-signal sources
+            if names[i] in ('vector_kb','gpt_rag','gemini','llm','local_consensus'):
+                score *= 1.05
+            if score > best_score:
+                best_score = score
+                best_idx = i
+        return texts[best_idx]
+    except Exception:
+        # Fallback: first non-empty text
+        for name, val in sources:
+            if isinstance(val, dict) and val.get('content'):
+                return val['content']
+            if isinstance(val, str) and val.strip():
+                return val
+        return None
 
 def ensure_relevance(query, answer, sources, threshold=0.22):
     """
@@ -1339,6 +1458,33 @@ def self_consistent_finalize(user_msg, sources, base_answer, samples=3):
         return candidates[best_idx]
     except Exception:
         return base_answer
+
+def local_self_consistency(user_msg, n=3, max_length=220):
+    """
+    Generate multiple local samples and pick the one most relevant to the question.
+    Uses LocalGPT only; no external APIs.
+    """
+    try:
+        if 'local_gpt' not in globals() or local_gpt is None:
+            return None
+        cands = get_local_gpt().generate(
+            f"Answer the following clearly and helpfully.\nQuestion: {user_msg}\nAnswer:",
+            max_length=max_length,
+            do_sample=True,
+            temperature=0.9,
+            top_p=0.95,
+            num_return_sequences=max(1, int(n)),
+        )
+        if isinstance(cands, str):
+            return cands
+        # Rank candidates by TF-IDF similarity to the question
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        vec = TfidfVectorizer().fit_transform([user_msg] + cands)
+        scores = (vec[0] @ vec[1:].T).toarray()[0]
+        best_idx = int(scores.argmax())
+        return cands[best_idx]
+    except Exception:
+        return None
 
 # --- Personality Adaptation ---
 def analyze_user_personality(username, msg):
@@ -1535,8 +1681,12 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
             personality = personality or 'friendly'
     model = model or 'all'
     personality = personality or 'friendly'
-    # Set model/personality for local_gpt
-    local_gpt.set_model(model, personality)
+    # Set model/personality/system prompt for local_gpt
+    try:
+        sys_prompt = flask.session.get('system_prompt')
+    except Exception:
+        sys_prompt = None
+    get_local_gpt().set_model(model, personality, bias_prompt=sys_prompt)
     # --- Custom Model Integration ---
     use_custom = (model == 'custom' or model == 'custom_llm')
     context = {
@@ -1690,7 +1840,13 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
             if kb_context:
                 context_str = '\n'.join([f"Q: {q}\nA: {a}" for q, a in kb_context])
                 prompt = f"You are a helpful AI assistant. Use the following knowledge base to answer the user's question.\n{context_str}\nUser: {msg_corrected}\nAI:"
-                return local_gpt.generate(prompt, max_length=180)
+                try:
+                    t = float(flask_session.get('temperature', GEN_TEMPERATURE))
+                    p = float(flask_session.get('top_p', GEN_TOP_P))
+                    mx = int(flask_session.get('max_tokens', MAX_TOKENS))
+                except Exception:
+                    t, p, mx = GEN_TEMPERATURE, GEN_TOP_P, MAX_TOKENS
+                return get_local_gpt().generate(prompt, max_length=min(mx,180), do_sample=True, temperature=t, top_p=p)
         except Exception:
             return None
 
@@ -1726,6 +1882,21 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
         except Exception:
             return None
 
+    # Reasoning level controls breadth and time
+    lvl = REASONING_LEVEL if REASONING_LEVEL in ('low','medium','high') else 'medium'
+    if lvl == 'low':
+        max_workers = 4
+        timeout_s = 8
+        self_consistency_n = 1
+    elif lvl == 'high':
+        max_workers = 8
+        timeout_s = 20
+        self_consistency_n = 5
+    else:
+        max_workers = 6
+        timeout_s = 12
+        self_consistency_n = 3
+
     parallel_results = run_parallel([
         ('gemini', _task_gemini),
         ('gpt_rag', _task_gpt_rag),
@@ -1733,10 +1904,47 @@ def get_response(msg, username=None, file_context=None, all_files=False, feedbac
         ('llm', _task_llm),
         ('google', _task_google),
         ('wikipedia', _task_wikipedia),
-    ], max_workers=6)
+    ], max_workers=max_workers, timeout=timeout_s)
     for name, val in parallel_results:
         if val:
             sources.append((name, val))
+    # Add local self-consistency candidate (no external APIs)
+    try:
+        sc_max_len = 160 if lvl == 'low' else (320 if lvl == 'high' else 220)
+        lc = local_self_consistency(msg_corrected, n=self_consistency_n, max_length=sc_max_len)
+        if lc:
+            sources.append(('local_consensus', lc))
+    except Exception:
+        pass
+    # If user selected the Super Model, pick the best single candidate across models/sources
+    if (model or '').lower() == 'super':
+        try:
+            extra_ctx = None
+            try:
+                vec_hits = query_vector_index(msg_corrected, top_k=3)
+                if vec_hits:
+                    extra_ctx = '\n'.join([h.get('chunk','') for h in vec_hits])
+            except Exception:
+                pass
+            best = select_best_text_from_sources(msg_corrected, sources, extra_context=extra_ctx)
+            if best:
+                # Optional adaptation to user personality
+                if username:
+                    personality = analyze_user_personality(username, msg)
+                    if personality:
+                        best = adapt_response_style(best, personality)
+                followup = None
+                try:
+                    followup_resp = requests.post("http://localhost:5050/generate/followup", json={"topic": msg_corrected})
+                    if followup_resp.ok:
+                        f = followup_resp.json().get("followup", None)
+                        if isinstance(f, str) and len(f.strip()) >= 5 and all(s not in f for s in ("Disqus","enable JavaScript","Comments")):
+                            followup = f
+                except Exception:
+                    pass
+                return {"type": "super", "content": best, "followup": followup, "personality": personality}
+        except Exception:
+            pass
     # --- Synthesize best answer ---
     followup = None
     best_lang = None
@@ -2449,30 +2657,118 @@ def query_vector_index(query, top_k=5):
 
 
 
-def generate_image_advanced(prompt, negative_prompt=None, seed=None, num_images=1):
-    import replicate
-    token = os.getenv("REPLICATE_API_TOKEN")
-    if not token:
-        return []
-    try:
-        args = {"prompt": prompt}
-        if negative_prompt:
-            args["negative_prompt"] = negative_prompt
-        if seed is not None:
-            try:
-                args["seed"] = int(seed)
-            except Exception:
-                pass
-        output = replicate.run(
-            "stability-ai/sdxl:9fa24d7e8cf3e4c0b7e7b2e0b1e5e1b6b6e1b6e1b6e1b6e1b6e1b6e1b6e1b6",
-            input=args,
-            api_token=token
-        )
-        urls = []
-        if isinstance(output, list):
-            urls = [str(u) for u in output][:max(1, int(num_images or 1))]
-        elif isinstance(output, str):
-            urls = [output]
+def generate_image_advanced(prompt, negative_prompt=None, seed=None, num_images=1, return_meta=False):
+    """Generate images using the configured backend mode.
+    - IMAGE_BACKEND_MODE = auto|gemini|replicate
+    - When return_meta=True, returns {'backend': <name>, 'urls': [...]}
+      Otherwise returns just a list of URL strings for backward compatibility.
+    """
+    mode = (IMAGE_BACKEND_MODE or 'auto')
+    tried = []
+
+    def _ret(urls, backend):
+        if return_meta:
+            return {'backend': backend, 'urls': urls}
         return urls
-    except Exception:
-        return []
+
+    # Helper: Gemini generate
+    def _try_gemini():
+        gemini_key = os.getenv('GEMINI_API_KEY')
+        if not gemini_key:
+            return None
+        try:
+            import base64, time
+            import google.generativeai as genai
+            genai.configure(api_key=gemini_key)
+            model_name = GEMINI_MODELS.get('image', 'models/imagen-3.0-generate-001')
+            model = genai.GenerativeModel(model_name)
+            resp = model.generate_content(prompt)
+            payloads = []
+            def _walk(obj):
+                if isinstance(obj, dict):
+                    if 'inline_data' in obj and isinstance(obj['inline_data'], dict) and 'data' in obj['inline_data']:
+                        payloads.append((obj['inline_data'].get('mime_type') or 'image/png', obj['inline_data']['data']))
+                    for v in obj.values():
+                        _walk(v)
+                elif isinstance(obj, (list, tuple)):
+                    for v in obj:
+                        _walk(v)
+                else:
+                    for attr in ('candidates','content','parts','data','inline_data','inlineData'):
+                        if hasattr(obj, attr):
+                            _walk(getattr(obj, attr))
+            _walk(resp)
+            outdir = os.path.join('static','generated')
+            os.makedirs(outdir, exist_ok=True)
+            urls = []
+            limit = max(1, int(num_images or 1))
+            for i, (mime, b64) in enumerate(payloads[:limit]):
+                ext = 'png' if 'png' in mime.lower() else ('jpg' if 'jpeg' in mime.lower() or 'jpg' in mime.lower() else 'png')
+                fname = f"gemini_img_{int(time.time()*1000)}_{i}.{ext}"
+                fpath = os.path.join(outdir, fname)
+                with open(fpath, 'wb') as f:
+                    f.write(base64.b64decode(b64))
+                urls.append(f"/static/generated/{fname}")
+            if urls:
+                return _ret(urls, 'gemini')
+        except Exception:
+            return None
+        return None
+
+    # Helper: Replicate generate
+    def _try_replicate():
+        try:
+            import replicate
+            token = os.getenv("REPLICATE_API_TOKEN")
+            if not token:
+                return None
+            args = {"prompt": prompt}
+            if negative_prompt:
+                args["negative_prompt"] = negative_prompt
+            if seed is not None:
+                try:
+                    args["seed"] = int(seed)
+                except Exception:
+                    pass
+            output = replicate.run(
+                "stability-ai/sdxl:9fa24d7e8cf3e4c0b7e7b2e0b1e5e1b6b6e1b6e1b6e1b6e1b6e1b6e1b6e1b6",
+                input=args,
+                api_token=token
+            )
+            urls = []
+            if isinstance(output, list):
+                urls = [str(u) for u in output][:max(1, int(num_images or 1))]
+            elif isinstance(output, str):
+                urls = [output]
+            if urls:
+                return _ret(urls, 'replicate')
+        except Exception:
+            return None
+        return None
+
+    # Order based on mode
+    if mode == 'gemini':
+        tried.append('gemini')
+        r = _try_gemini()
+        if r is not None:
+            return r
+        tried.append('replicate')
+        r = _try_replicate()
+        if r is not None:
+            return r
+    elif mode == 'replicate':
+        tried.append('replicate')
+        r = _try_replicate()
+        if r is not None:
+            return r
+    else:  # auto
+        tried.extend(['gemini','replicate'])
+        r = _try_gemini()
+        if r is not None:
+            return r
+        r = _try_replicate()
+        if r is not None:
+            return r
+    # Nothing worked
+    return _ret([], tried[-1] if tried else 'none')
+

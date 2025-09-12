@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>DIZI Translator</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .container { max-width: 900px; margin: 40px auto; background:#23272f; padding:20px; border-radius:12px; color:#eee; }
+    textarea { width:100%; min-height:180px; background:#181a20; color:#eee; border:1px solid #444; border-radius:8px; padding:12px; }
+    select, button { margin-top:10px; }
+    .row { display:flex; gap:12px; align-items:center; }
+    .out { white-space:pre-wrap; background:#181a20; border:1px solid #444; border-radius:8px; padding:12px; margin-top:12px; }
+  </style>
+  <script>
+    async function doTranslate(){
+      const text = document.getElementById('src').value;
+      const target = document.getElementById('target').value;
+      const res = await fetch('/translate', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text, target })});
+      const data = await res.json();
+      document.getElementById('detected').textContent = 'Detected: ' + (data.source||'?');
+      document.getElementById('out').textContent = data.translated || (data.error||'Error');
+    }
+  </script>
+</head>
+<body>
+  <div class="container">
+    <h2>DIZI Universal Translator</h2>
+    <textarea id="src" placeholder="Paste text to translate..."></textarea>
+    <div class="row">
+      <label>Target:</label>
+      <select id="target">
+        {% for code, name in langs %}
+          <option value="{{ code }}" {% if code=='en' %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select>
+      <button onclick="doTranslate()">Translate</button>
+      <span id="detected" style="margin-left:10px;color:#7fd957;"></span>
+    </div>
+    <div id="out" class="out"></div>
+  </div>
+</body>
+</html>
+

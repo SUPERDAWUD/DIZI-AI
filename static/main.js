@@ -50,5 +50,16 @@ function switchModel() {
     const personality = document.getElementById('personality-select').value;
     localStorage.setItem('selectedModel', model);
     localStorage.setItem('selectedPersonality', personality);
-    alert('Switched to ' + model + ' model with ' + personality + ' personality!');
+    try {
+        fetch('/api/set-user-prefs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model, personality })
+        }).then(res => res.json()).then(data => {
+            const ok = data && data.ok;
+            alert((ok ? 'Applied: ' : 'Saved locally: ') + model + ' + ' + personality);
+        }).catch(() => alert('Saved locally: ' + model + ' + ' + personality));
+    } catch (e) {
+        alert('Saved locally: ' + model + ' + ' + personality);
+    }
 }

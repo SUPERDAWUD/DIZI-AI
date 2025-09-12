@@ -6,6 +6,7 @@ from utils import start_generator_api
 from functools import wraps
 import json
 from dotenv import load_dotenv
+import requests
 import time
 
 load_dotenv()
@@ -19,6 +20,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 DEV_MODE_PASSWORD = os.getenv('DEV_MODE_PASSWORD', 'supersecret')
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'devsecret')
+PREFER_LOCAL_STREAM = os.getenv('PREFER_LOCAL_STREAM', 'false').strip().lower() in ('1','true','yes','on')
 
 # Dev Mode decorator
 
@@ -75,6 +77,15 @@ def dev():
             return render_template('dev_panel.html')
         error = 'Incorrect password'
     return render_template('dev_login.html', error=error)
+
+@app.route('/api/set-prefer-local-stream', methods=['POST'])
+@dev_mode_required
+def api_set_prefer_local_stream():
+    global PREFER_LOCAL_STREAM
+    data = request.get_json() or {}
+    val = bool(data.get('prefer_local', False))
+    PREFER_LOCAL_STREAM = val
+    return jsonify({'ok': True, 'prefer_local_stream': PREFER_LOCAL_STREAM})
 
 # Optional: API for chat sidebar
 @app.route('/api/chats')
@@ -235,14 +246,6 @@ def api_load_chat():
         history = json.load(f)
     return jsonify({'success': True, 'history': history})
 
-if __name__ == "__main__":
-    start_generator_api()
-    start_indexer_watch()
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-
-
-
 @app.route('/api/web-summarize', methods=['POST'])
 def api_web_summarize():
     data = request.get_json() or {}
@@ -272,16 +275,48 @@ def api_rag_query():
     k = int(data.get('top_k', 5))
     hits = query_vector_index(q, top_k=k)
     return jsonify({'ok': True, 'hits': hits})
+    
+@app.route('/api/set-user-prefs', methods=['POST'])
+def api_set_user_prefs():
+    data = request.get_json() or {}
+    model = data.get('model')
+    personality = data.get('personality')
+    system_prompt = data.get('system_prompt')
+    temperature = data.get('temperature')
+    top_p = data.get('top_p')
+    max_tokens = data.get('max_tokens')
+    if model is not None:
+        session['model'] = model
+    if personality is not None:
+        session['personality'] = personality
+    if system_prompt is not None:
+        session['system_prompt'] = system_prompt
+    if temperature is not None:
+        session['temperature'] = float(temperature)
+    if top_p is not None:
+        session['top_p'] = float(top_p)
+    if max_tokens is not None:
+        session['max_tokens'] = int(max_tokens)
+    return jsonify({
+        'ok': True,
+        'model': session.get('model'),
+        'personality': session.get('personality'),
+        'system_prompt': session.get('system_prompt'),
+        'temperature': session.get('temperature'),
+        'top_p': session.get('top_p'),
+        'max_tokens': session.get('max_tokens'),
+    })
 
 @app.route('/api/set-device', methods=['POST'])
 @dev_mode_required
 def api_set_device():
-    from chat import local_gpt
+    from chat import get_local_gpt
     data = request.get_json() or {}
     device = data.get('device','auto')
     try:
-        if hasattr(local_gpt, 'set_device'):
-            local_gpt.set_device(device)
+        g = get_local_gpt()
+        if hasattr(g, 'set_device'):
+            g.set_device(device)
     except Exception:
         pass
     return jsonify({'device': device})
@@ -297,6 +332,95 @@ def api_set_aggregation_mode():
     chat_mod.AGGREGATION_MODE = mode
     return jsonify({'ok': True, 'mode': chat_mod.AGGREGATION_MODE})
 
+@app.route('/api/set-reasoning-level', methods=['POST'])
+@dev_mode_required
+def api_set_reasoning_level():
+    import chat as chat_mod
+    data = request.get_json() or {}
+    lvl = (data.get('level') or 'medium').lower()
+    if lvl not in ('low','medium','high'):
+        return jsonify({'ok': False, 'error': 'level must be low, medium, or high'}), 400
+    chat_mod.REASONING_LEVEL = lvl
+    return jsonify({'ok': True, 'level': chat_mod.REASONING_LEVEL})
+
+@app.route('/api/set-image-backend', methods=['POST'])
+@dev_mode_required
+def api_set_image_backend():
+    import chat as chat_mod
+    data = request.get_json() or {}
+    mode = (data.get('mode') or 'auto').lower()
+    if mode not in ('auto','gemini','replicate'):
+        return jsonify({'ok': False, 'error': 'mode must be auto, gemini, or replicate'}), 400
+    chat_mod.IMAGE_BACKEND_MODE = mode
+    return jsonify({'ok': True, 'mode': chat_mod.IMAGE_BACKEND_MODE})
+
+@app.route('/api/diagnostics/gpu')
+def api_gpu_diag():
+    info = {}
+    try:
+        import torch
+        info['torch_cuda_available'] = bool(torch.cuda.is_available())
+        info['device_count'] = int(torch.cuda.device_count())
+        if torch.cuda.is_available():
+            info['current_device'] = int(torch.cuda.current_device())
+            info['device_name'] = torch.cuda.get_device_name(0)
+            props = torch.cuda.get_device_properties(0)
+            info['total_vram_gb'] = round(props.total_memory / (1024**3), 2)
+    except Exception as e:
+        info['torch_error'] = str(e)
+    try:
+        from chat import local_gpt
+        if hasattr(local_gpt, 'device'):
+            info['local_gpt_device'] = str(local_gpt.device)
+    except Exception:
+        pass
+    info['env'] = {
+        'LOCAL_DEVICE': os.getenv('LOCAL_DEVICE'),
+        'FORCE_GPU': os.getenv('FORCE_GPU'),
+        'QUANTIZATION': os.getenv('QUANTIZATION'),
+    }
+    return jsonify(info)
+
+@app.route('/api/force-gpu', methods=['POST'])
+@dev_mode_required
+def api_force_gpu():
+    import os as _os
+    import torch as _torch
+    from chat import get_local_gpt
+    # Set process env preferences
+    _os.environ['LOCAL_DEVICE'] = 'cuda'
+    _os.environ['FORCE_GPU'] = 'true'
+    data = request.get_json() or {}
+    quant = str(data.get('quantization', '')).strip().lower()
+    if quant in ('8bit','4bit'):
+        _os.environ['QUANTIZATION'] = '4bit' if '4' in quant else '8bit'
+    # Try move model
+    cuda_ok = bool(_torch.cuda.is_available())
+    moved = False
+    err = None
+    try:
+        if cuda_ok:
+            g = get_local_gpt()
+            if hasattr(g, 'set_device'):
+                g.set_device('cuda')
+                moved = True
+    except Exception as e:
+        err = str(e)
+    info = {
+        'torch_version': getattr(_torch, '__version__', 'unknown'),
+        'cuda_available': cuda_ok,
+        'device_count': int(_torch.cuda.device_count()) if cuda_ok else 0,
+        'device_name': _torch.cuda.get_device_name(0) if cuda_ok else None,
+        'forced': moved,
+        'error': err,
+        'env': {
+            'LOCAL_DEVICE': _os.environ.get('LOCAL_DEVICE'),
+            'FORCE_GPU': _os.environ.get('FORCE_GPU'),
+            'QUANTIZATION': _os.environ.get('QUANTIZATION'),
+        }
+    }
+    return jsonify({'ok': True, 'info': info})
+
 @app.route("/chat/stream", methods=["POST"])
 def chat_route_stream():
     """Server-Sent Events streaming of a chat response (chunked or Gemini streaming)."""
@@ -305,7 +429,7 @@ def chat_route_stream():
             data = request.get_json() or {}
             user_msg = data.get("message", "")
             user_name = data.get("user", None)
-            prefer_gemini = bool(data.get("prefer_gemini_stream", True))
+            prefer_gemini = bool(data.get("prefer_gemini_stream", True)) and (not PREFER_LOCAL_STREAM)
             web = bool(data.get("web", False))
             rag = bool(data.get("rag", False))
             # Try Gemini token streaming if configured
@@ -332,16 +456,9 @@ def chat_route_stream():
             meta = {k: reply.get(k) for k in ("type", "language", "personality", "followup") if isinstance(reply, dict)}
             yield "data: " + json.dumps({"meta": meta}) + "\n\n"
             content = reply.get("content", "") if isinstance(reply, dict) else str(reply)
-            buf = []
-            for token in content.split():
-                buf.append(token)
-                if len(" ".join(buf)) > 48:
-                    chunk = " ".join(buf) + " "
-                    yield "data: " + json.dumps({"delta": chunk}) + "\n\n"
-                    buf = []
-            if buf:
-                chunk = " ".join(buf)
-                yield "data: " + json.dumps({"delta": chunk}) + "\n\n"
+            # Stream word-by-word to mimic ChatGPT typing
+            for w in content.split():
+                yield "data: " + json.dumps({"delta": w + " "}) + "\n\n"
             yield "data: " + json.dumps({"done": True}) + "\n\n"
         except Exception as e:
             yield "data: " + json.dumps({"error": str(e)}) + "\n\n"
@@ -428,5 +545,62 @@ def api_image_generate():
     n = data.get('num_images', 1)
     if not prompt:
         return jsonify({'ok': False, 'error': 'Missing prompt'}), 400
-    urls = generate_image_advanced(prompt, negative_prompt=negative, seed=seed, num_images=n)
-    return jsonify({'ok': True, 'urls': urls})
+    meta = generate_image_advanced(prompt, negative_prompt=negative, seed=seed, num_images=n, return_meta=True)
+    urls = meta['urls'] if isinstance(meta, dict) else (meta or [])
+    backend = meta.get('backend') if isinstance(meta, dict) else None
+    return jsonify({'ok': True, 'urls': urls, 'backend': backend})
+
+@app.route('/api/followups', methods=['POST'])
+def api_followups():
+    data = request.get_json() or {}
+    topic = data.get('topic') or data.get('message') or ''
+    n = int(data.get('n', 3))
+    out = []
+    try:
+        for _ in range(max(1, n)):
+            try:
+                r = requests.post("http://localhost:5050/generate/followup", json={"topic": topic}, timeout=5)
+                if r.ok:
+                    s = r.json().get('followup')
+                    if isinstance(s, str) and s.strip() and s not in out:
+                        out.append(s.strip())
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # Fallbacks
+    if not out:
+        out = [
+            "Can you elaborate?",
+            "Could you give a concrete example?",
+            "What are the next steps?",
+        ][:n]
+    return jsonify({'ok': True, 'followups': out})
+
+@app.route('/api/translate', methods=['POST'])
+def api_translate():
+    from chat import translate_text, detect_language
+    data = request.get_json() or {}
+    text = data.get('text','')
+    target = (data.get('target') or 'en').lower()
+    if not text.strip():
+        return jsonify({'ok': False, 'error': 'Missing text'}), 400
+    src = detect_language(text)
+    translated = translate_text(text, target_lang=target)
+    return jsonify({'ok': True, 'source': src, 'target': target, 'translated': translated})
+
+# Mount translator UI under main app to avoid unsafe ports
+@app.route('/translator')
+def translator_ui():
+    try:
+        from chat import ISO_LANGS
+        langs = sorted(ISO_LANGS.items())
+    except Exception:
+        langs = [('en','English'),('es','Spanish'),('fr','French')]
+    return render_template('translator.html', langs=langs)
+
+if __name__ == "__main__":
+    start_generator_api()
+    start_indexer_watch()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

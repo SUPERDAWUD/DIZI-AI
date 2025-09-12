@@ -112,7 +112,55 @@
         <option value="on">On</option>
         <option value="off">Off</option>
       </select>
+      <br/>
+      <label for="reasoning-level-select">Reasoning level:</label>
+      <select id="reasoning-level-select" onchange="switchReasoningLevel()">
+        <option value="low">Low (fast)</option>
+        <option value="medium" selected>Medium</option>
+        <option value="high">High (best)</option>
+      </select>
+      <br/>
+      <label><input type="checkbox" id="prefer-local-stream" onchange="togglePreferLocal()"> Prefer local streaming</label>
       <span id="agg-status" style="margin-left:1em;color:#7fd957;"></span>
+    </div>
+    <div class="section">
+      <h2>Images</h2>
+      <label for="image-backend">Image backend:</label>
+      <select id="image-backend" onchange="switchImageBackend()">
+        <option value="auto" selected>Auto (Gemini → Replicate)</option>
+        <option value="gemini">Gemini only</option>
+        <option value="replicate">Replicate only</option>
+      </select>
+      <span id="image-backend-status" style="margin-left:1em;color:#7fd957;"></span>
+    </div>
+    <div class="section">
+      <h2>System Prompt & Generation</h2>
+      <label for="system-prompt">Custom system instructions:</label>
+      <textarea id="system-prompt" rows="4" placeholder="e.g., You are a concise, expert assistant..."></textarea>
+      <label>Temperature: <span id="temp-val">0.7</span></label>
+      <input id="temp-range" type="range" min="0" max="1" step="0.05" value="0.7" oninput="document.getElementById('temp-val').textContent=this.value">
+      <label>Top-p: <span id="topp-val">0.95</span></label>
+      <input id="topp-range" type="range" min="0" max="1" step="0.05" value="0.95" oninput="document.getElementById('topp-val').textContent=this.value">
+      <label>Max tokens:</label>
+      <input id="max-tokens" type="number" min="64" max="2048" value="256"/>
+      <button onclick="applyGenParams()">Apply</button>
+      <span id="gen-params-status" style="margin-left:1em;color:#7fd957;"></span>
+    </div>
+    <div class="section">
+      <h2>GPU Diagnostics</h2>
+      <button onclick="gpuDiag()">Run GPU Diagnostics</button>
+      <pre id="gpu-diag" style="max-height:220px;overflow:auto;background:#111;padding:1em;border-radius:6px;"></pre>
+    </div>
+    <div class="section">
+      <h2>GPU Control</h2>
+      <button onclick="forceGPU()">Force GPU (set CUDA + move model)</button>
+      <label style="margin-left:10px;">Quantization:</label>
+      <select id="quantization">
+        <option value="">(none)</option>
+        <option value="8bit">8-bit</option>
+        <option value="4bit">4-bit</option>
+      </select>
+      <span id="forcegpu-status" style="margin-left:1em;color:#7fd957;"></span>
     </div>
     <div class="section">
       <h2>Vectors (RAG)</h2>
@@ -206,6 +254,38 @@ Object.entries(userQuestions).forEach(([user, questions]) => {
     const mode = document.getElementById('reasoning-select').value;
     document.getElementById('agg-status').textContent = 'Reasoning (set env REASONING_MODE=' + mode + ')';
   }
+  async function switchReasoningLevel(){
+    const level = document.getElementById('reasoning-level-select').value;
+    const res = await fetch('/api/set-reasoning-level', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({level}) });
+    const data = await res.json();
+    document.getElementById('agg-status').textContent = 'Reasoning level: ' + (data.level||level);
+  }
+  async function togglePreferLocal(){
+    const prefer_local = document.getElementById('prefer-local-stream').checked;
+    const res = await fetch('/api/set-prefer-local-stream', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({prefer_local}) });
+    const data = await res.json();
+    document.getElementById('agg-status').textContent = 'Prefer local stream: ' + (data.prefer_local_stream?'on':'off');
+  }
+  async function switchImageBackend(){
+    const mode = document.getElementById('image-backend').value;
+    const res = await fetch('/api/set-image-backend', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode}) });
+    const data = await res.json();
+    document.getElementById('image-backend-status').textContent = 'Image backend: ' + (data.mode||'unknown');
+  }
+  async function gpuDiag(){
+    const res = await fetch('/api/diagnostics/gpu');
+    const data = await res.json();
+    document.getElementById('gpu-diag').textContent = JSON.stringify(data, null, 2);
+  }
+  async function forceGPU(){
+    const q = document.getElementById('quantization').value;
+    const res = await fetch('/api/force-gpu', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ quantization: q })});
+    const data = await res.json();
+    const ok = data && data.ok && data.info && data.info.cuda_available;
+    const msg = ok ? ('CUDA OK on ' + (data.info.device_name||'')) : ('CUDA not available. torch='+ (data.info?.torch_version||'?'));
+    document.getElementById('forcegpu-status').textContent = msg;
+    gpuDiag();
+  }
   async function reindexRag(){
     const res = await fetch('/api/rag/reindex', {method:'POST'});
     const data = await res.json();
@@ -229,7 +309,17 @@ Object.entries(userQuestions).forEach(([user, questions]) => {
     const res = await fetch('/api/web-summarize', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({query, num_results:3})});
     const data = await res.json();
     document.getElementById('web-output').textContent = JSON.stringify(data.result || data, null, 2);
-  }  </script></body>
+  }
+  async function applyGenParams(){
+    const system_prompt = document.getElementById('system-prompt').value;
+    const temperature = parseFloat(document.getElementById('temp-range').value);
+    const top_p = parseFloat(document.getElementById('topp-range').value);
+    const max_tokens = parseInt(document.getElementById('max-tokens').value||'256');
+    const res = await fetch('/api/set-user-prefs', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ system_prompt, temperature, top_p, max_tokens })});
+    const data = await res.json();
+    document.getElementById('gen-params-status').textContent = data.ok ? 'Applied' : 'Failed';
+  }
+  </script></body>
 </html>
 
 

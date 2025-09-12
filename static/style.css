@@ -34,6 +34,26 @@ h1 {
   font-size: 17px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.08);
 }
+/* New UI bits */
+.followup-suggestions button,
+.input-area button,
+.file-upload-section button,
+.dev-mode-section button,
+#save-chat-btn,
+#new-chat-btn {
+  background: #222;
+  color: #eee;
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.followup-suggestions button:hover { background: #2a2a2a; }
+.message.user { background:#1b1b1b; padding:8px; border-radius:6px; margin:6px 0; }
+.message.bot { background:#171717; padding:8px; border-radius:6px; margin:6px 0; }
+.message .followup { margin-left:1em; }
+.overlay { position:fixed; inset:0; background:rgba(0,0,0,0.7); display:flex; align-items:center; justify-content:center; }
+.overlay .popup { background:#222; padding:1em; border-radius:8px; }
 
 .message {
   padding: 10px 14px;
@@ -58,12 +78,17 @@ h1 {
 }
 
 .input-area {
-  display: flex;
-  gap: 10px;
+  /* Center the message box prominently */
+  max-width: 900px;
+  margin: 0 auto 8px auto;
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  align-items: center;
+  gap: 8px;
 }
 
-input[type="text"] {
-  flex-grow: 1;
+#user-input, input[type="text"] {
+  width: 100%;
   padding: 12px;
   border: 1px solid #444;
   border-radius: 8px;
@@ -73,9 +98,7 @@ input[type="text"] {
   outline: none;
   transition: border 0.2s;
 }
-input[type="text"]:focus {
-  border: 1.5px solid #3aafa9;
-}
+#user-input:focus, input[type="text"]:focus { border: 1.5px solid #3aafa9; }
 
 button {
   padding: 12px 20px;
@@ -91,6 +114,7 @@ button {
 button:hover {
   background: linear-gradient(90deg, #4ecca3 0%, #3aafa9 100%);
 }
+.tag-edited{ font-size: 0.8em; color: #9aa0a6; margin-left: 6px; }
 
 #username-overlay {
   position: fixed;
@@ -98,7 +122,7 @@ button:hover {
   width: 100%; height: 100%;
   background: rgba(0, 0, 0, 0.5);
   display: flex; align-items: center; justify-content: center;
-  z-index: 999;
+  z-index: 2147483647; /* ensure on top */
 }
 
 .username-box {
@@ -141,3 +165,6 @@ button:hover {
   vertical-align: middle;
 }
 
+.overlay { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
+.overlay .popup { background:#222; padding:1em; border-radius:8px; }
+.overlay .popup button { pointer-events:auto; }
