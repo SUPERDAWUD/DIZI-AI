@@ -244,6 +244,9 @@ $env:DIZI_AUTOMATIC1111_URL="http://127.0.0.1:7860"
 
 No hosted service is required for either path.
 
+
+*As of right now, DIZI‑AI does not include automated model downloads. Users must obtain and install their own models, and full model‑management automation will be introduced in the next development phase.*
+
 ## Project Status
 
 DIZI-AI is in active early development. Expect rapid iteration, architectural improvements, and expanded agent capabilities.
