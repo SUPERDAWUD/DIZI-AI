@@ -1,0 +1,75 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python build and packaging output
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env/
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Test, lint, type-check, and coverage caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Logs and runtime files
+*.log
+logs/
+*.pid
+*.tmp
+tmp/
+temp/
+
+# Frontend dependencies and build output
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+frontend/dist/
+frontend/build/
+
+# Generated dashboard artifacts
+frontend/static/generated/
+
+# Local model weights and checkpoints
+models/**/*.gguf
+models/**/*.bin
+models/**/*.safetensors
+models/**/*.pt
+models/**/*.pth
+models/**/weights/
+models/**/.cache/
+
+# IDE and OS noise
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Common typo; keep the real file named .gitignore
+.gitnore

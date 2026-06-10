@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DIZI-AI — Operations Console</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="/static/vendor/chart.js"></script>
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+
+      <!-- Top bar: model selector, system status, run/stop -->
+      <header class="topbar">
+        <div class="topbar-left">
+            <img id="logo" src="/static/logo.png" alt="DIZI-AI" class="top-logo" />
+            <label class="top-label">Model</label>
+            <select id="top-model-select" class="top-select"></select>
+          </div>
+        <div class="topbar-center">
+          <div id="system-status" class="system-status">Status: <span>initializing</span></div>
+        </div>
+        <div class="topbar-right">
+          <button id="top-run" class="btn btn-primary">Run</button>
+          <button id="top-stop" class="btn btn-ghost">Stop</button>
+        </div>
+      </header>
+
+      <!-- Main layout: left / center / right -->
+      <aside class="panel-left">
+        <div class="panel-block">
+          <h3 class="panel-title">Agents</h3>
+          <ul id="agent-list" class="agent-list"></ul>
+        </div>
+
+        <div class="panel-block">
+          <h3 class="panel-title">Model Manager</h3>
+          <div class="model-info">
+            <div id="model-name">—</div>
+            <div id="model-quant">Quant: —</div>
+            <div id="model-kv">KV footprint: —</div>
+            <div class="model-controls">
+              <button id="load-model" class="btn btn-small">Load</button>
+              <button id="unload-model" class="btn btn-small btn-ghost">Unload</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="panel-center">
+        <div class="main-content">
+          <!-- Execution stream -->
+          <div id="execution-stream" class="execution-stream">
+            <div class="stream-header">
+              <div>
+                <h2>Execution Stream</h2>
+                <p class="stream-note">Live task events, agent progress, and system outputs.</p>
+              </div>
+              <div class="stream-status">
+                <span id="run-state">Idle</span>
+              </div>
+            </div>
+            <section id="stream" class="stream timeline">
+              <!-- messages inserted here -->
+            </section>
+          </div>
+
+          <div id="output-container" class="output-container">
+            <div class="output-header">
+              <h3>Output</h3>
+              <div class="output-actions">
+                <button id="copy-output" class="btn btn-small btn-ghost" type="button">Copy Output</button>
+                <button id="clear-output" class="btn btn-small btn-ghost" type="button">Reset / Clear Output</button>
+                <label class="raw-json-toggle">
+                  <input id="show-raw-json" type="checkbox" />
+                  <span>Show Raw JSON</span>
+                </label>
+              </div>
+            </div>
+            <div id="output-bubble">Waiting for output...</div>
+            <pre id="raw-json-panel" class="raw-json-panel" hidden>{}</pre>
+          </div>
+          <div id="image-bubble" class="image-bubble" aria-live="polite"></div>
+        </div>
+
+        <!-- Bottom input bar -->
+        <footer class="bottombar bottom-bar">
+          <div class="input-mode-bar">
+            <span class="input-mode-label" hidden>Input Mode:</span>
+            <button id="mode-prompt" class="toggle-pill active" type="button" hidden>Prompt</button>
+            <button id="mode-file" class="toggle-pill" type="button" hidden>File</button>
+            <span class="input-mode-label">Mode:</span>
+            <select id="agent-mode" class="top-select">
+              <option value="chat">Chat</option>
+              <option value="code">Code</option>
+              <option value="image">Image</option>
+              <option value="pipeline" selected>Pipeline</option>
+            </select>
+          </div>
+          <input id="user-input" type="text" placeholder="Enter instructions or a prompt" />
+          <label class="file-picker" id="file-picker-label" hidden>
+            <span>Choose File</span>
+            <input id="file-input" type="file" />
+          </label>
+          <button id="run-multi" onclick="runPipeline()" class="btn btn-primary">Run Multi-Agent</button>
+        </footer>
+      </main>
+
+      <aside class="panel-right">
+        <div class="panel-block metrics-panel">
+          <h3 class="panel-title">Profiler</h3>
+          <div class="metric-card">
+            <div class="metric-header"><span>Latency per Agent</span><span class="metric-value">Realtime</span></div>
+            <canvas id="chart-latency" height="140"></canvas>
+          </div>
+          <div class="metric-card">
+            <div class="metric-header"><span>Tokens/sec</span><span class="metric-value" id="token-rate">—</span></div>
+            <canvas id="chart-throughput" height="100"></canvas>
+          </div>
+          <div class="metric-card">
+            <div class="metric-header"><span>KV-Cache</span><span class="metric-value">Writes</span></div>
+            <canvas id="chart-kv" height="100"></canvas>
+          </div>
+          <div class="metric-card">
+            <div class="metric-header"><span>Memory</span><span class="metric-value">MB</span></div>
+            <canvas id="chart-memory" height="100"></canvas>
+          </div>
+        </div>
+
+        <div class="panel-block stats-panel">
+          <h3 class="panel-title">KV Cache</h3>
+          <div id="kv-stats">Entries: — | Reads: — | Writes: —</div>
+        </div>
+
+        <div class="panel-block stats-panel">
+          <h3 class="panel-title">Hardware Simulation</h3>
+          <div class="metric-row"><span>MatMul Tiles</span><span id="hw-tiles">—</span></div>
+          <div class="metric-row"><span>SRAM</span><span id="hw-sram">—</span></div>
+          <div class="metric-row"><span>Bandwidth</span><span id="hw-bandwidth">—</span></div>
+          <div class="metric-row"><span>Predicted tokens/sec</span><span id="hw-predicted">—</span></div>
+        </div>
+      </aside>
+
+    </div>
+
+    <script src="/static/main.js"></script>
+  </body>
+</html>
