@@ -37,6 +37,8 @@ In this setup:
 - No external image service is contacted
 - No API key is needed
 
+  *DIZI‑AI currently operates as a software platform, with custom hardware planned for a later development phase to complete the full-stack ecosystem.*
+
 This is the preferred method for privacy, security, and enterprise use.
 
 The current ImageAgent tries local generation in this order:
