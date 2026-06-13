@@ -12,7 +12,7 @@ DIZI-AI includes four execution modes:
 
 - Chat: conversational interaction with local models
 - Code: code generation, explanation, and refactoring
-- Image: local image generation workflows
+- Image: local image generation workflows (API KEY REQUIRED FOR THIS SERVICE)
 - Pipeline: multi-agent execution using the Reader -> Summarizer -> Checker chain
 
 All active runtime computation is local. No hosted AI service or API key is required.
